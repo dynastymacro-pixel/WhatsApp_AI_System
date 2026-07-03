@@ -258,10 +258,30 @@ export class BaileysAdapter implements IWhatsAppAdapter {
     if (!msg.key) return null;
 
     // Bail out on status broadcasts
-    const jid = msg.key.remoteJid ?? '';
+    let jid = msg.key.remoteJid ?? '';
     if (jid.endsWith('@broadcast') || jid === 'status@broadcast') return null;
 
-    const from = jid.replace('@s.whatsapp.net', '').replace('@g.us', '');
+    // Resolve LID (Linked Device ID) JIDs to the user's real phone JID (@s.whatsapp.net)
+    if (jid.endsWith('@lid')) {
+      const participantJid = msg.participant || msg.key.participant || '';
+      if (participantJid.endsWith('@s.whatsapp.net')) {
+        logger.info(
+          { lidJid: jid, resolvedJid: participantJid },
+          '[BaileysAdapter] Resolved real @s.whatsapp.net JID from participant metadata',
+        );
+        jid = participantJid;
+      } else {
+        logger.warn(
+          { lidJid: jid, participant: participantJid },
+          '[BaileysAdapter] Received JID from @lid but participant JID is not available or not @s.whatsapp.net',
+        );
+      }
+    }
+
+    const from = jid
+      .replace('@s.whatsapp.net', '')
+      .replace('@g.us', '')
+      .replace('@lid', '');
     const waMessageId = msg.key.id ?? '';
     const timestampMs =
       typeof msg.messageTimestamp === 'number'
