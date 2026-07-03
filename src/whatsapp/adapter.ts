@@ -81,6 +81,23 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
     const jid = this.toJid(to);
 
+    // ── Temporary Diagnostic: Query WhatsApp for LID details ─────────────────
+    if (this.sock && jid.endsWith('@lid')) {
+      logger.info({ jid, clientId: this.clientId }, '[Diagnostic] Querying sock.onWhatsApp for LID');
+      try {
+        const lookup = await this.sock.onWhatsApp(jid);
+        logger.info(
+          { jid, exists: lookup?.[0]?.exists, resolvedJid: lookup?.[0]?.jid, raw: lookup, clientId: this.clientId },
+          '[Diagnostic] onWhatsApp lookup resolved successfully',
+        );
+      } catch (err: any) {
+        logger.error(
+          { jid, err: err.message, stack: err.stack, clientId: this.clientId },
+          '[Diagnostic] onWhatsApp query failed',
+        );
+      }
+    }
+
     // Explicit 30-second timeout for Baileys message delivery to prevent worker hangs
     const timeoutMs = 30000;
     const sendPromise = this.sock.sendMessage(jid, { text });
