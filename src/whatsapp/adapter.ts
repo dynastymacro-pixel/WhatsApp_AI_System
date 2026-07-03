@@ -39,6 +39,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   private flushSession: (() => Promise<void>) | null = null;
 
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private connectionPromise: Promise<void> | null = null;
 
   constructor(clientId: string) {
     this.clientId = clientId;
@@ -90,115 +91,161 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       ),
     );
 
-    await Promise.race([sendPromise, timeoutPromise]);
+    try {
+      await Promise.race([sendPromise, timeoutPromise]);
+    } catch (err: any) {
+      // If it's our explicit timeout error, trigger a reconnect
+      if (err.message?.includes('sendMessage timed out')) {
+        logger.error(
+          { err: err.message, clientId: this.clientId },
+          '[BaileysAdapter] Message send timed out — marking disconnected and triggering reconnect',
+        );
+        this.disconnectAndReconnect();
+      }
+      throw err; // re-throw to propagate to BullMQ job handler
+    }
   }
 
   /**
-   * Initialises the Baileys socket, loads/creates auth state, and connects.
-   * Call once at startup. Auto-reconnects on non-logout disconnections.
+   * Proactively closes a dead socket and triggers a reconnect.
+   * Leverages the existing socket lifecycle to prevent duplicate connect loops.
    */
+  private disconnectAndReconnect(): void {
+    if (!this.connected) return;
+
+    logger.warn({ clientId: this.clientId }, '[WhatsApp] Triggering socket teardown and reconnection');
+    this.connected = false;
+    resetPaired();
+
+    try {
+      // end() cleanly terminates the WS and fires connection.update connection='close'
+      this.sock?.end(new Error('Send timeout'));
+    } catch (err: any) {
+      logger.error({ err: err.message, clientId: this.clientId }, '[WhatsApp] Error ending socket; forcing reconnect');
+      // If ending fails, invoke connect directly as fallback
+      setTimeout(() => {
+        this.connect().catch((e) => logger.error({ err: e.message }, '[WhatsApp] Fallback reconnect failed'));
+      }, 5000);
+    }
+  }
+
   async connect(): Promise<void> {
-    // ── Connection Health logger (every 60s) ─────────────────────────────────
-    if (!this.healthCheckInterval) {
-      this.healthCheckInterval = setInterval(() => {
-        logger.info(
-          { clientId: this.clientId, connected: this.connected },
-          `[WhatsApp] Healthcheck — Connection state: ${this.connected ? 'CONNECTED' : 'DISCONNECTED'}`,
-        );
-      }, 60000);
+    if (this.connectionPromise) {
+      logger.info({ clientId: this.clientId }, '[WhatsApp] Connection already in progress — reusing promise');
+      return this.connectionPromise;
     }
 
-    const { version } = await fetchLatestBaileysVersion();
-    const { state, saveCreds, flushSession } = await useSupabaseAuthState(this.clientId);
-    this.flushSession = flushSession;
-
-    const baileysLogger = pino({ level: 'silent' }); // suppress Baileys internal noise
-
-    this.sock = makeWASocket({
-      version,
-      auth: state,
-      logger: baileysLogger,
-      printQRInTerminal: false, // we handle QR output ourselves (3 layers below)
-      generateHighQualityLinkPreview: false,
-      syncFullHistory: false,
-    });
-
-    // ── Auth state persistence ───────────────────────────────────────────────
-    this.sock.ev.on('creds.update', saveCreds);
-
-    // ── Connection & QR handling ─────────────────────────────────────────────
-    this.sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        // ── Layer 1: ASCII art in stdout (works in local terminal) ───────────
-        logger.info('[WhatsApp] Scan the QR code below (local terminal):');
-        qrcodeTerminal.generate(qr, { small: true });
-
-        // ── Layer 2: Raw QR string in structured log (searchable in Railway) ─
-        // Copy and paste this string into any online QR generator if needed.
-        logger.info(
-          { qrRawString: qr },
-          '[WhatsApp] Raw QR string logged — paste into https://www.qrserver.com if ASCII is unreadable',
-        );
-
-        // ── Layer 3: Browser image via /qr endpoint ──────────────────────────
-        setQrData(qr);
-        logger.info(
-          { url: `http://localhost:${config.qrServerPort}/qr` },
-          '[WhatsApp] Open /qr in your browser to scan a proper QR image',
-        );
+    this.connectionPromise = (async () => {
+      // ── Connection Health logger (every 60s) ─────────────────────────────────
+      if (!this.healthCheckInterval) {
+        this.healthCheckInterval = setInterval(() => {
+          logger.info(
+            { clientId: this.clientId, connected: this.connected },
+            `[WhatsApp] Healthcheck — Connection state: ${this.connected ? 'CONNECTED' : 'DISCONNECTED'}`,
+          );
+        }, 60000);
       }
 
-      if (connection === 'open') {
-        this.connected = true;
-        markPaired();
-        logger.info({ clientId: this.clientId }, '[WhatsApp] ✅ Connected');
-      }
+      const { version } = await fetchLatestBaileysVersion();
+      const { state, saveCreds, flushSession } = await useSupabaseAuthState(this.clientId);
+      this.flushSession = flushSession;
 
-      if (connection === 'close') {
-        this.connected = false;
-        resetPaired();
-        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const baileysLogger = pino({ level: 'silent' }); // suppress Baileys internal noise
 
-        logger.warn(
-          { statusCode, shouldReconnect, clientId: this.clientId },
-          '[WhatsApp] Connection closed',
-        );
+      const sock = makeWASocket({
+        version,
+        auth: state,
+        logger: baileysLogger,
+        printQRInTerminal: false, // we handle QR output ourselves (3 layers below)
+        generateHighQualityLinkPreview: false,
+        syncFullHistory: false,
+        keepAliveIntervalMs: 15000, // keep socket active / detect dead socket fast
+      });
 
-        if (shouldReconnect) {
-          logger.info('[WhatsApp] Reconnecting in 5s...');
-          await this.sleep(5000);
-          await this.connect();
-        } else {
-          logger.error(
-            '[WhatsApp] Logged out — clear wa_session_data in DB and restart to re-pair.',
+      this.sock = sock;
+
+      // ── Auth state persistence ───────────────────────────────────────────────
+      sock.ev.on('creds.update', saveCreds);
+
+      // ── Connection & QR handling ─────────────────────────────────────────────
+      sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          // ── Layer 1: ASCII art in stdout (works in local terminal) ───────────
+          logger.info('[WhatsApp] Scan the QR code below (local terminal):');
+          qrcodeTerminal.generate(qr, { small: true });
+
+          // ── Layer 2: Raw QR string in structured log (searchable in Railway) ─
+          logger.info(
+            { qrRawString: qr },
+            '[WhatsApp] Raw QR string logged — paste into https://www.qrserver.com if ASCII is unreadable',
+          );
+
+          // ── Layer 3: Browser image via /qr endpoint ──────────────────────────
+          setQrData(qr);
+          logger.info(
+            { url: `http://localhost:${config.qrServerPort}/qr` },
+            '[WhatsApp] Open /qr in your browser to scan a proper QR image',
           );
         }
-      }
-    });
 
-    // ── Incoming messages ────────────────────────────────────────────────────
-    this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return; // skip history sync bulk
-
-      for (const msg of messages) {
-        if (!msg.message || msg.key?.fromMe) continue; // skip our own sent messages
-
-        const inbound = this.normaliseInbound(msg);
-        if (!inbound) continue;
-
-        for (const handler of this.inboundHandlers) {
-          await handler(inbound).catch((err: Error) => {
-            logger.error(
-              { err: err.message, from: inbound.from },
-              '[WhatsApp] Inbound handler error',
-            );
-          });
+        if (connection === 'open') {
+          this.connected = true;
+          markPaired();
+          logger.info({ clientId: this.clientId }, '[WhatsApp] ✅ Connected');
         }
-      }
-    });
+
+        if (connection === 'close') {
+          this.connected = false;
+          resetPaired();
+          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+          logger.warn(
+            { statusCode, shouldReconnect, clientId: this.clientId },
+            '[WhatsApp] Connection closed',
+          );
+
+          if (shouldReconnect) {
+            logger.info('[WhatsApp] Reconnecting in 5s...');
+            await this.sleep(5000);
+            await this.connect();
+          } else {
+            logger.error(
+              '[WhatsApp] Logged out — clear wa_session_data in DB and restart to re-pair.',
+            );
+          }
+        }
+      });
+
+      // ── Incoming messages ────────────────────────────────────────────────────
+      sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return; // skip history sync bulk
+
+        for (const msg of messages) {
+          if (!msg.message || msg.key?.fromMe) continue; // skip our own sent messages
+
+          const inbound = this.normaliseInbound(msg);
+          if (!inbound) continue;
+
+          for (const handler of this.inboundHandlers) {
+            await handler(inbound).catch((err: Error) => {
+              logger.error(
+                { err: err.message, from: inbound.from },
+                '[WhatsApp] Inbound handler error',
+              );
+            });
+          }
+        }
+      });
+    })();
+
+    try {
+      await this.connectionPromise;
+    } finally {
+      this.connectionPromise = null;
+    }
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
