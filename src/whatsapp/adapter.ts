@@ -278,10 +278,9 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       }
     }
 
-    const from = jid
-      .replace('@s.whatsapp.net', '')
-      .replace('@g.us', '')
-      .replace('@lid', '');
+    const from = jid.endsWith('@lid')
+      ? jid
+      : jid.replace('@s.whatsapp.net', '').replace('@g.us', '');
     const waMessageId = msg.key.id ?? '';
     const timestampMs =
       typeof msg.messageTimestamp === 'number'
