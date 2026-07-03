@@ -28,6 +28,7 @@
     "@whiskeysockets/baileys": "^7.0.0-rc13",
     "bullmq": "^5.79.2",
     "dotenv": "^17.4.2",
+    "openai": "^6.45.0",
     "pino": "^10.3.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
