@@ -5,6 +5,7 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import { Message, MessageDirection } from '../types';
 import { BaseRepository } from './BaseRepository';
+import { logger } from '../../utils/logger';
 
 export interface LogMessageInput {
   clientId: string;
@@ -23,21 +24,36 @@ export class MessageRepository extends BaseRepository {
   /**
    * Logs a message to the messages table.
    * Idempotent: if (client_id, wa_message_id) already exists, the insert
-   * is silently ignored (UNIQUE constraint + ignoreDuplicates).
+   * is silently ignored (UNIQUE constraint violation caught and treated as a no-op).
    */
-  async logMessage(input: LogMessageInput): Promise<Message> {
+  async logMessage(input: LogMessageInput): Promise<Message | null> {
     const { clientId, customerId, direction, contentType, content, waMessageId } = input;
 
-    const result = await this.tenantInsert('messages', clientId, {
-      customer_id: customerId,
-      direction,
-      content_type: contentType,
-      content,
-      wa_message_id: waMessageId,
-      timestamp: new Date().toISOString(),
-    });
-
-    return result as unknown as Message;
+    try {
+      const result = await this.tenantInsert('messages', clientId, {
+        customer_id: customerId,
+        direction,
+        content_type: contentType,
+        content,
+        wa_message_id: waMessageId,
+        timestamp: new Date().toISOString(),
+      });
+      return result as unknown as Message;
+    } catch (err: any) {
+      const msg = err.message || '';
+      if (
+        msg.includes('unique constraint') ||
+        msg.includes('duplicate key') ||
+        msg.includes('23505')
+      ) {
+        logger.debug(
+          { clientId, waMessageId },
+          '[MessageRepository] Duplicate message detected — ignoring insert (idempotency no-op)',
+        );
+        return null;
+      }
+      throw err; // re-throw genuine database failures
+    }
   }
 
   /**
