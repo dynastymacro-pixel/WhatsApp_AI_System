@@ -36,6 +36,23 @@ export function startOutgoingWorker(): Worker {
       // Get the tenant's WhatsApp adapter — never call Baileys directly
       const adapter = getWhatsAppClient(clientId);
 
+      // Defensive guard: if disconnected, wait briefly for connection recovery
+      if (!adapter.isConnected()) {
+        console.log(`[Worker] Tenant WhatsApp adapter is disconnected — waiting up to 5s for reconnect...`);
+        const maxWaitMs = 5000;
+        const checkIntervalMs = 500;
+        let elapsed = 0;
+        while (!adapter.isConnected() && elapsed < maxWaitMs) {
+          await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
+          elapsed += checkIntervalMs;
+        }
+        if (adapter.isConnected()) {
+          console.log(`[Worker] WhatsApp reconnected successfully after ${elapsed}ms — proceeding to send`);
+        } else {
+          console.log(`[Worker] WhatsApp failed to reconnect within ${maxWaitMs / 1000}s — proceeding to send (expecting failure)`);
+        }
+      }
+
       // Send — typing delay applied inside adapter.sendText()
       await adapter.sendText(to, text);
 

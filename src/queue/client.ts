@@ -56,6 +56,13 @@ export async function enqueueOutgoingMessage(
   const queue = getOutgoingQueue();
   await queue.add(OUTGOING_MESSAGE_JOB, data, {
     jobId: `${data.clientId}-${Date.now()}-${data.to}`,
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 2000,
+    },
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 200 },
   });
   console.log(`[Queue] Enqueued outgoing message to ${data.to} (clientId: ${data.clientId})`);
 }
