@@ -1,0 +1,7 @@
+# nixpacks.toml — Explicit Node 20 override for Railway/Nixpacks
+# Forces Nixpacks to install Node 20 regardless of auto-detection.
+# This is the most reliable method — takes priority over .nvmrc and
+# package.json engines when Nixpacks detection is inconsistent.
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
