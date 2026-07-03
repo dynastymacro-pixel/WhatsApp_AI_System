@@ -40,6 +40,16 @@ export const config = {
   // WhatsApp
   defaultClientId: required('DEFAULT_CLIENT_ID'),
 
+  // AI — Gemini
+  // Design choice: gemini-2.0-flash — current stable cheap-tier model (July 2025).
+  // Swap GEMINI_MODEL env var to change model without a code deploy.
+  geminiApiKey: required('GEMINI_API_KEY'),
+  geminiModel: optional('GEMINI_MODEL', 'gemini-2.0-flash'),
+
+  // Negotiation guardrails
+  // Design choice: 3 rounds before holding firm. Override via env var.
+  maxNegotiationRounds: optionalInt('MAX_NEGOTIATION_ROUNDS', 3),
+
   // Anti-ban
   typingDelayMinMs: optionalInt('TYPING_DELAY_MIN_MS', 1000),
   typingDelayMaxMs: optionalInt('TYPING_DELAY_MAX_MS', 3000),

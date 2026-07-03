@@ -1,65 +1,104 @@
 // src/router/messageRouter.ts
 // Message Router — the single decision point for what happens to each inbound message.
 //
-// Day 1 behaviour:
+// Day 2 behaviour:
 //   1. Find or create the customer record (multi-tenant, by phone + clientId)
 //   2. Touch their last_seen timestamp
-//   3. Log the inbound message to the DB
-//   4. If the message is text, enqueue an echo reply via the outgoing queue
-//   5. Non-text messages are already logged with a TODO note in the adapter
+//   3. Log the inbound message to the raw `messages` table (Day 1 — unchanged)
+//   4. If the message is text, run it through the AI conversation engine
+//   5. Log the AI reply to the raw `messages` table as outbound
+//   6. Enqueue the AI reply via BullMQ (same queue as Day 1)
+//   7. Non-text messages are logged with a TODO note
 
 import { CustomerRepository } from '../db/repositories/CustomerRepository';
 import { MessageRepository } from '../db/repositories/MessageRepository';
 import { getSupabaseClient } from '../db/supabase';
 import { enqueueOutgoingMessage } from '../queue/client';
 import { InboundMessage } from '../whatsapp/types';
+import { processMessage } from '../conversation/engine';
+import { logger } from '../utils/logger';
 
-const customerRepo = new CustomerRepository(getSupabaseClient());
-const messageRepo = new MessageRepository(getSupabaseClient());
+const supabase      = getSupabaseClient();
+const customerRepo  = new CustomerRepository(supabase);
+const messageRepo   = new MessageRepository(supabase);
 
 export async function routeInboundMessage(
   clientId: string,
   msg: InboundMessage,
 ): Promise<void> {
+
   // ── 1. Find or create customer ────────────────────────────────────────────
   const customer = await customerRepo.findOrCreate(clientId, msg.from);
 
   // ── 2. Touch last_seen ────────────────────────────────────────────────────
   await customerRepo.touchLastSeen(clientId, customer.id);
 
-  // ── 3. Log inbound message ────────────────────────────────────────────────
+  // ── 3. Log inbound to raw messages table ─────────────────────────────────
   await messageRepo.logMessage({
     clientId,
-    customerId: customer.id,
-    direction: 'inbound',
+    customerId:  customer.id,
+    direction:   'inbound',
     contentType: msg.contentType,
-    content: msg.text || `[${msg.contentType}]`,
+    content:     msg.text || `[${msg.contentType}]`,
     waMessageId: msg.waMessageId,
   });
 
-  console.log(
-    `[Router] Inbound ${msg.contentType} from ${msg.from} logged ` +
-    `(customerId: ${customer.id}, clientId: ${clientId})`,
+  logger.info(
+    { from: msg.from, type: msg.contentType, customerId: customer.id, clientId },
+    '[Router] Inbound message logged',
   );
 
   // ── 4. Route by content type ──────────────────────────────────────────────
-  if (msg.contentType === 'text' && msg.text.trim()) {
-    // Day 1: Echo the message back through the queue
-    await enqueueOutgoingMessage({
-      clientId,
-      to: msg.from,
-      text: `Received: ${msg.text}`,
-      customerId: customer.id,
-      replyToWaMessageId: msg.waMessageId,
-    });
-
-    console.log(`[Router] Echo reply enqueued for ${msg.from}`);
+  if (msg.contentType !== 'text' || !msg.text.trim()) {
+    logger.info(
+      { type: msg.contentType, from: msg.from },
+      '[Router] Non-text message — logged only, no AI reply (TODO Day 3+)',
+    );
     return;
   }
 
-  // Non-text: already logged above, no action today
-  console.log(
-    `[Router] Non-text message (${msg.contentType}) from ${msg.from} — ` +
-    `no action taken (TODO: handle in future day)`,
+  // ── 5. AI conversation engine ─────────────────────────────────────────────
+  let replyText: string;
+  let conversationId: string;
+
+  try {
+    const result = await processMessage(clientId, customer.id, msg.text.trim());
+    replyText      = result.replyText;
+    conversationId = result.conversationId;
+  } catch (err) {
+    // AI engine failed — log the error but don't crash the whole router.
+    // Send a safe fallback so the customer gets a response.
+    logger.error(
+      { err: (err as Error).message, from: msg.from, clientId },
+      '[Router] AI engine error — sending fallback reply',
+    );
+    replyText      = "I'm sorry, I'm having trouble right now. Please try again in a moment! 🙏";
+    conversationId = 'unknown';
+  }
+
+  // ── 6. Log AI reply to raw messages table ─────────────────────────────────
+  // Generate a synthetic wa_message_id for outbound AI replies (no real WA id yet).
+  const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;
+  await messageRepo.logMessage({
+    clientId,
+    customerId:  customer.id,
+    direction:   'outbound',
+    contentType: 'text',
+    content:     replyText,
+    waMessageId: outboundWaId,
+  });
+
+  // ── 7. Enqueue via BullMQ (same queue as Day 1) ───────────────────────────
+  await enqueueOutgoingMessage({
+    clientId,
+    to:                 msg.from,
+    text:               replyText,
+    customerId:         customer.id,
+    replyToWaMessageId: msg.waMessageId,
+  });
+
+  logger.info(
+    { to: msg.from, conversationId, clientId },
+    '[Router] AI reply enqueued',
   );
 }
