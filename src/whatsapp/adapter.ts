@@ -209,8 +209,11 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
           if (shouldReconnect) {
             logger.info('[WhatsApp] Reconnecting in 5s...');
-            await this.sleep(5000);
-            await this.connect();
+            setTimeout(() => {
+              this.connect().catch((err: Error) => {
+                logger.error({ err: err.message, clientId: this.clientId }, '[WhatsApp] Auto-reconnect failed');
+              });
+            }, 5000);
           } else {
             logger.error(
               '[WhatsApp] Logged out — clear wa_session_data in DB and restart to re-pair.',
