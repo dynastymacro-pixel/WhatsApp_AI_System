@@ -4,4 +4,4 @@
 # package.json engines when Nixpacks detection is inconsistent.
 
 [phases.setup]
-nixPkgs = ["nodejs_20"]
+nixPkgs = ["nodejs_22"]
