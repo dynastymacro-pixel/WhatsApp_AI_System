@@ -1,0 +1,18 @@
+# railway.toml — Railway deployment configuration
+# https://docs.railway.app/reference/config-as-code
+#
+# PORT NOTE: Railway injects $PORT at runtime and routes public traffic to it.
+# Our QR server reads process.env.PORT when set, so no port config is needed here.
+# To get a public URL: Railway dashboard → your service → Settings → Networking
+# → Generate Domain. Then open https://<your-domain>/qr to scan the pairing QR.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install && npm run build"
+
+[deploy]
+startCommand = "npm run start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+healthcheckPath = "/health"
+healthcheckTimeout = 120
