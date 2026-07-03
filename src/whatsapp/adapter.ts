@@ -38,6 +38,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   private inboundHandlers: InboundHandler[] = [];
   private flushSession: (() => Promise<void>) | null = null;
 
+  private healthCheckInterval: NodeJS.Timeout | null = null;
+
   constructor(clientId: string) {
     this.clientId = clientId;
   }
@@ -49,6 +51,11 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
   /** Returns the flushSession function for SIGTERM handling. */
   getFlushSession(): (() => Promise<void>) | null {
+    // Clear health check interval on shutdown
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
     return this.flushSession;
   }
 
@@ -57,7 +64,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   }
 
   /**
-   * Sends a text message with a human-like typing delay.
+   * Sends a text message with a human-like typing delay and a 30s timeout.
    * NEVER call the underlying sock.sendMessage from outside this class.
    */
   async sendText(to: string, text: string): Promise<void> {
@@ -72,7 +79,18 @@ export class BaileysAdapter implements IWhatsAppAdapter {
     await this.sleep(delay);
 
     const jid = this.toJid(to);
-    await this.sock.sendMessage(jid, { text });
+
+    // Explicit 30-second timeout for Baileys message delivery to prevent worker hangs
+    const timeoutMs = 30000;
+    const sendPromise = this.sock.sendMessage(jid, { text });
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`[BaileysAdapter] sendMessage timed out after ${timeoutMs / 1000}s (clientId: ${this.clientId})`)),
+        timeoutMs,
+      ),
+    );
+
+    await Promise.race([sendPromise, timeoutPromise]);
   }
 
   /**
@@ -80,6 +98,16 @@ export class BaileysAdapter implements IWhatsAppAdapter {
    * Call once at startup. Auto-reconnects on non-logout disconnections.
    */
   async connect(): Promise<void> {
+    // ── Connection Health logger (every 60s) ─────────────────────────────────
+    if (!this.healthCheckInterval) {
+      this.healthCheckInterval = setInterval(() => {
+        logger.info(
+          { clientId: this.clientId, connected: this.connected },
+          `[WhatsApp] Healthcheck — Connection state: ${this.connected ? 'CONNECTED' : 'DISCONNECTED'}`,
+        );
+      }, 60000);
+    }
+
     const { version } = await fetchLatestBaileysVersion();
     const { state, saveCreds, flushSession } = await useSupabaseAuthState(this.clientId);
     this.flushSession = flushSession;

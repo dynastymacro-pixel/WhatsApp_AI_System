@@ -61,6 +61,10 @@ export function startOutgoingWorker(): Worker {
     },
   );
 
+  _worker.on('completed', (job) => {
+    console.log(`[Worker] Job ${job?.id} completed successfully at queue level`);
+  });
+
   _worker.on('failed', (job, err) => {
     console.error(`[Worker] Job ${job?.id} failed:`, err.message);
   });
