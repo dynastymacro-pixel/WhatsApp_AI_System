@@ -68,8 +68,18 @@ export async function routeInboundMessage(
   } catch (err) {
     // AI engine failed — log the error but don't crash the whole router.
     // Send a safe fallback so the customer gets a response.
+    const errorDetails = err as Error & { status?: number; statusCode?: number; statusText?: string; code?: string | number };
     logger.error(
-      { err: (err as Error).message, from: msg.from, clientId },
+      { 
+        err: errorDetails,
+        message: errorDetails.message,
+        stack: errorDetails.stack,
+        status: errorDetails.status || errorDetails.statusCode,
+        statusText: errorDetails.statusText,
+        code: errorDetails.code,
+        from: msg.from, 
+        clientId 
+      },
       '[Router] AI engine error — sending fallback reply',
     );
     replyText      = "I'm sorry, I'm having trouble right now. Please try again in a moment! 🙏";
