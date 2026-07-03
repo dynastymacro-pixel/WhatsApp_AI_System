@@ -28,6 +28,7 @@ export interface Client {
   admin_whatsapp_number: string | null;
   admin_channel_preference: AdminChannelPreference;
   bot_mode: BotMode;
+  payment_details: string | null;
   created_at: string;
 }
 

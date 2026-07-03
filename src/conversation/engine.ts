@@ -81,7 +81,21 @@ export async function processMessage(
   }
 
   // ── 5. Determine negotiation state ───────────────────────────────────────
-  const roundsUsed     = conversation.negotiation_rounds;
+  let roundsUsed     = conversation.negotiation_rounds;
+  let currentStatus  = conversation.status;
+
+  // Reset Gate 1: Timeout Reset (24 Hours)
+  const lastUpdate = new Date(conversation.updated_at).getTime();
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  if (currentStatus === 'awaiting_payment' && lastUpdate < oneDayAgo) {
+    logger.info(
+      { conversationId: conversation.id, lastUpdate: conversation.updated_at },
+      '[Engine] 24h timeout elapsed while awaiting_payment — resetting status to active and negotiation rounds to 0',
+    );
+    currentStatus = 'active';
+    roundsUsed = 0;
+  }
+
   const isHoldingFirm  = roundsUsed >= config.maxNegotiationRounds;
 
   // ── 6. Build system prompt ────────────────────────────────────────────────
@@ -105,6 +119,24 @@ export async function processMessage(
     activeProduct = await productRepo.getById(clientId, productId);
   }
 
+  // Reset Gate 2: Product Change Reset
+  if (
+    productId &&
+    conversation.current_product_id &&
+    productId !== conversation.current_product_id
+  ) {
+    logger.info(
+      {
+        conversationId: conversation.id,
+        oldProduct: conversation.current_product_id,
+        newProduct: productId,
+      },
+      '[Engine] Product changed — resetting status to active and negotiation rounds to 0',
+    );
+    currentStatus = 'active';
+    roundsUsed = 0;
+  }
+
   // ── 9. Apply negotiation guardrail ────────────────────────────────────────
   const guardrailResult = await applyNegotiationGuardrail(
     aiResponse,
@@ -125,15 +157,33 @@ export async function processMessage(
   const finalReply = guardrailResult.reply;
 
   // ── 10. Update conversation state ─────────────────────────────────────────
+  let nextStatus = currentStatus;
   const isPriceNegotiation =
     finalReply.intent === 'price_negotiation' ||
     finalReply.offeredPrice !== undefined;
 
+  if (finalReply.intent === 'order_intent') {
+    if (currentStatus !== 'awaiting_payment') {
+      if (client?.payment_details && client.payment_details.trim().length > 0) {
+        finalReply.message = `${finalReply.message}\n\n${client.payment_details}`;
+        nextStatus = 'awaiting_payment';
+      } else {
+        logger.warn(
+          { clientId, conversationId: conversation.id },
+          '[Engine] Client has not configured payment_details. Falling back to default message.',
+        );
+        finalReply.message = `${finalReply.message}\n\nThank you! Our team will send the payment details shortly.`;
+      }
+    }
+  } else if (isPriceNegotiation) {
+    nextStatus = 'negotiating';
+  }
+
   await convRepo.update(clientId, conversation.id, {
-    status: isPriceNegotiation ? 'negotiating' : conversation.status,
+    status: nextStatus,
+    negotiation_rounds: isPriceNegotiation ? (roundsUsed + 1) : roundsUsed,
     ...(finalReply.productId && { current_product_id: finalReply.productId }),
     ...(isPriceNegotiation && {
-      negotiation_rounds: roundsUsed + 1,
       current_offer: finalReply.offeredPrice ?? conversation.current_offer,
     }),
   });

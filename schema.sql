@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS clients (
     admin_whatsapp_number      TEXT,
     admin_channel_preference   admin_channel_pref NOT NULL DEFAULT 'whatsapp',
     bot_mode                   BOOLEAN     NOT NULL DEFAULT TRUE,
+    payment_details            TEXT,
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
