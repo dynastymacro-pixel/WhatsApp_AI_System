@@ -46,6 +46,10 @@ export const config = {
   geminiApiKey: required('GEMINI_API_KEY'),
   geminiModel: optional('GEMINI_MODEL', 'gemini-2.0-flash'),
 
+  // AI — OpenAI
+  openaiApiKey: required('OPENAI_API_KEY'),
+  openaiModel: optional('OPENAI_MODEL', 'gpt-4o-mini'),
+
   // Negotiation guardrails
   // Design choice: 3 rounds before holding firm. Override via env var.
   maxNegotiationRounds: optionalInt('MAX_NEGOTIATION_ROUNDS', 3),

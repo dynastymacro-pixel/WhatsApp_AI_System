@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { GeminiAIClient } from './geminiClient';
+import { OpenAIClient } from './openaiClient';
 import { config } from '../../config';
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ export interface IAIClient {
 
 // ── Singleton — swap the implementation here to change providers ──────────────
 
-export const aiClient: IAIClient = new GeminiAIClient(
-  config.geminiApiKey,
-  config.geminiModel,
+export const aiClient: IAIClient = new OpenAIClient(
+  config.openaiApiKey,
+  config.openaiModel,
 );
