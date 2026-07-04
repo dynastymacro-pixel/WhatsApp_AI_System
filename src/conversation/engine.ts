@@ -122,9 +122,7 @@ export async function processMessage(
   // Reset Gate 2: Product Change Reset
   // We compute the pre-guardrail price negotiation state so the guardrail in Step 9
   // receives the correct reset round count.
-  const isPriceNegotiationPre =
-    aiResponse.reply.intent === 'price_negotiation' ||
-    aiResponse.reply.offeredPrice !== undefined;
+  const isPriceNegotiationPre = aiResponse.reply.intent === 'price_negotiation';
 
   if (
     productId &&
@@ -166,9 +164,7 @@ export async function processMessage(
 
   // ── 10. Update conversation state ─────────────────────────────────────────
   let nextStatus = currentStatus;
-  const isPriceNegotiation =
-    finalReply.intent === 'price_negotiation' ||
-    finalReply.offeredPrice !== undefined;
+  const isPriceNegotiation = finalReply.intent === 'price_negotiation';
 
   // Note: payment_confirmation is deliberately excluded from the append and status logic to avoid resending details.
   if (finalReply.intent === 'order_intent') {
@@ -187,6 +183,18 @@ export async function processMessage(
   } else if (isPriceNegotiation) {
     nextStatus = 'negotiating';
   }
+
+  logger.info(
+    {
+      conversationId: conversation.id,
+      intent: finalReply.intent,
+      offeredPrice: finalReply.offeredPrice,
+      previousStatus: currentStatus,
+      nextStatus,
+      isPriceNegotiation,
+    },
+    '[Engine] Conversation status transition',
+  );
 
   await convRepo.update(clientId, conversation.id, {
     status: nextStatus,
