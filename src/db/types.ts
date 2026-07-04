@@ -32,6 +32,7 @@ export interface Client {
   admin_channel_preference: AdminChannelPreference;
   bot_mode: BotMode;
   payment_details: string | null;
+  custom_instructions: string | null;          // supplementary tone/style notes for the bot
   // Phase 1: tier & notification settings (schema only — no logic yet)
   notification_tier: NotificationTier;
   notification_channel: NotificationChannel;

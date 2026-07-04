@@ -102,7 +102,13 @@ export async function processMessage(
 
   // ── 6. Build system prompt ────────────────────────────────────────────────
   const hasPaymentDetails = Boolean(client?.payment_details && client.payment_details.trim().length > 0);
-  const systemPrompt = buildSystemPrompt(businessName, products, isHoldingFirm, hasPaymentDetails);
+  const systemPrompt = buildSystemPrompt(
+    businessName,
+    products,
+    isHoldingFirm,
+    hasPaymentDetails,
+    client?.custom_instructions ?? null,
+  );
 
   const aiRequest: AICompletionRequest = {
     systemPrompt,

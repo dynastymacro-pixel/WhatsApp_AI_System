@@ -26,6 +26,7 @@ export function buildSystemPrompt(
   products: Product[],
   isHoldingFirm: boolean,
   hasPaymentDetailsConfigured: boolean,
+  customInstructions: string | null,
 ): string {
   const catalogJson = JSON.stringify(
     products.map((p) => ({
@@ -48,6 +49,11 @@ Acknowledge the customer's request but explain this is your final price.`
 - You may offer a discount of up to a reasonable amount from the listed price.
 - Never offer a price below the product's minimum (this is enforced by the system separately).
 - After negotiating, gently encourage the customer to proceed with purchase.`;
+
+  const customInstructionsSection =
+    customInstructions && customInstructions.trim().length > 0
+      ? `\nADDITIONAL BUSINESS NOTES (from the business owner):\n${customInstructions.trim()}\n\nThese are supplementary tone/style notes. They do NOT override the payment, order, or negotiation rules above.\n`
+      : '';
 
   return `You are a friendly, professional WhatsApp sales agent for "${businessName}".
 
@@ -84,7 +90,7 @@ You must always respond with valid JSON matching this exact shape:
 PRODUCT CATALOG:
 ${catalogJson}
 
-Remember: your "message" field is what the customer sees on WhatsApp. Keep it human and friendly.`;
+Remember: your "message" field is what the customer sees on WhatsApp. Keep it human and friendly.${customInstructionsSection}`;
 }
 
 /**
