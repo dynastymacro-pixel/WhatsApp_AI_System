@@ -12,6 +12,8 @@
 
 import { CustomerRepository } from '../db/repositories/CustomerRepository';
 import { MessageRepository } from '../db/repositories/MessageRepository';
+import { ConversationRepository } from '../db/repositories/ConversationRepository';
+import { ConversationMessageRepository } from '../db/repositories/ConversationMessageRepository';
 import { getSupabaseClient } from '../db/supabase';
 import { enqueueOutgoingMessage } from '../queue/client';
 import { InboundMessage } from '../whatsapp/types';
@@ -21,6 +23,8 @@ import { logger } from '../utils/logger';
 const supabase      = getSupabaseClient();
 const customerRepo  = new CustomerRepository(supabase);
 const messageRepo   = new MessageRepository(supabase);
+const convRepo      = new ConversationRepository(supabase);
+const convMsgRepo   = new ConversationMessageRepository(supabase);
 
 export async function routeInboundMessage(
   clientId: string,
@@ -49,6 +53,49 @@ export async function routeInboundMessage(
   );
 
   // ── 4. Route by content type ──────────────────────────────────────────────
+  if (msg.contentType === 'image') {
+    logger.info(
+      { from: msg.from, type: msg.contentType },
+      '[Router] Image message received — sending deterministic payment confirmation acknowledgment',
+    );
+
+    const replyText =
+      "Thanks for sending that! We've received your screenshot. Our team will confirm your payment and get back to you shortly with your order details.";
+
+    // A. Resolve or create active conversation
+    const conversation = await convRepo.findOrCreate(clientId, customer.id);
+
+    // B. Append customer image placeholder and AI reply to structured conversation history
+    await convMsgRepo.append(clientId, conversation.id, 'customer', '[Customer sent an image]');
+    await convMsgRepo.append(clientId, conversation.id, 'ai', replyText);
+
+    // C. Log AI reply to raw messages table
+    const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;
+    await messageRepo.logMessage({
+      clientId,
+      customerId:  customer.id,
+      direction:   'outbound',
+      contentType: 'text',
+      content:     replyText,
+      waMessageId: outboundWaId,
+    });
+
+    // D. Enqueue AI reply via BullMQ
+    await enqueueOutgoingMessage({
+      clientId,
+      to:                 msg.from,
+      text:               replyText,
+      customerId:         customer.id,
+      replyToWaMessageId: msg.waMessageId,
+    });
+
+    logger.info(
+      { to: msg.from, conversationId: conversation.id, clientId },
+      '[Router] Image acknowledgment reply enqueued',
+    );
+    return;
+  }
+
   if (msg.contentType !== 'text' || !msg.text.trim()) {
     logger.info(
       { type: msg.contentType, from: msg.from },
