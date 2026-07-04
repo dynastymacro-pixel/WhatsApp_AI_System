@@ -19,6 +19,7 @@ import { getSupabaseClient } from '../db/supabase';
 import { enqueueOutgoingMessage } from '../queue/client';
 import { InboundMessage } from '../whatsapp/types';
 import { processMessage } from '../conversation/engine';
+import { notifyAdminOfScreenshot } from '../services/notificationService';
 import { logger } from '../utils/logger';
 
 const supabase      = getSupabaseClient();
@@ -68,13 +69,28 @@ export async function routeInboundMessage(
     const conversation = await convRepo.findOrCreate(clientId, customer.id);
 
     // B. Stamp screenshot_received_at on the pending order (no-op if no order exists yet)
-    await orderRepo.markScreenshotReceived(clientId, conversation.id);
+    const stampedOrder = await orderRepo.markScreenshotReceived(clientId, conversation.id);
 
-    // C. Append customer image placeholder and AI reply to structured conversation history
+    // C. Fire-and-forget Telegram notification — must never block the customer reply.
+    // .catch() logs unexpected errors that escape notifyAdminOfScreenshot's own try/catch.
+    if (stampedOrder) {
+      notifyAdminOfScreenshot(clientId, {
+        orderId:              stampedOrder.id,
+        customerPhone:        msg.from,
+        productId:            stampedOrder.product_id,
+        agreedPrice:          stampedOrder.agreed_price,
+        screenshotReceivedAt: stampedOrder.screenshot_received_at,
+      }).catch((err) => {
+        logger.error({ err, clientId, orderId: stampedOrder.id },
+          '[Router] notifyAdminOfScreenshot unhandled rejection');
+      });
+    }
+
+    // D. Append customer image placeholder and AI reply to structured conversation history
     await convMsgRepo.append(clientId, conversation.id, 'customer', '[Customer sent an image]');
     await convMsgRepo.append(clientId, conversation.id, 'ai', replyText);
 
-    // D. Log AI reply to raw messages table
+    // E. Log AI reply to raw messages table
     const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;
     await messageRepo.logMessage({
       clientId,
@@ -85,7 +101,7 @@ export async function routeInboundMessage(
       waMessageId: outboundWaId,
     });
 
-    // E. Enqueue AI reply via BullMQ
+    // F. Enqueue AI reply via BullMQ
     await enqueueOutgoingMessage({
       clientId,
       to:                 msg.from,
