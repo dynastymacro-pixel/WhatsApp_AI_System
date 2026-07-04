@@ -4,12 +4,15 @@
 
 -- ── Enums ────────────────────────────────────────────────────────────────────
 
-CREATE TYPE admin_channel_pref AS ENUM ('telegram', 'whatsapp', 'both');
-CREATE TYPE message_dir        AS ENUM ('inbound', 'outbound');
-CREATE TYPE stock_status_type  AS ENUM ('available', 'out_of_stock');
-CREATE TYPE delivery_type      AS ENUM ('digital_link', 'manual');
-CREATE TYPE conversation_status AS ENUM ('active', 'negotiating', 'awaiting_payment', 'closed');
-CREATE TYPE conversation_role  AS ENUM ('customer', 'ai', 'system');
+CREATE TYPE admin_channel_pref        AS ENUM ('telegram', 'whatsapp', 'both');
+CREATE TYPE message_dir               AS ENUM ('inbound', 'outbound');
+CREATE TYPE stock_status_type         AS ENUM ('available', 'out_of_stock');
+CREATE TYPE delivery_type             AS ENUM ('digital_link', 'manual');
+CREATE TYPE conversation_status       AS ENUM ('active', 'negotiating', 'awaiting_payment', 'closed');
+CREATE TYPE conversation_role         AS ENUM ('customer', 'ai', 'system');
+CREATE TYPE order_approval_status     AS ENUM ('pending', 'approved', 'rejected');
+CREATE TYPE notification_channel_type AS ENUM ('dashboard', 'telegram', 'whatsapp');
+CREATE TYPE notification_tier_type    AS ENUM ('free', 'pro', 'ultra');
 
 -- NOTE: bot_mode is deliberately BOOLEAN for now.
 -- In a later week it will be migrated to an enum
@@ -20,16 +23,22 @@ CREATE TYPE conversation_role  AS ENUM ('customer', 'ai', 'system');
 -- ── clients ──────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS clients (
-    id                         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_name              TEXT        NOT NULL,
-    wa_phone_number_id         TEXT,
-    wa_session_data            JSONB,          -- serialised Baileys auth state
-    telegram_chat_id           TEXT,
-    admin_whatsapp_number      TEXT,
-    admin_channel_preference   admin_channel_pref NOT NULL DEFAULT 'whatsapp',
-    bot_mode                   BOOLEAN     NOT NULL DEFAULT TRUE,
-    payment_details            TEXT,
-    created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                             UUID                      PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_name                  TEXT                      NOT NULL,
+    wa_phone_number_id             TEXT,
+    wa_session_data                JSONB,                    -- serialised Baileys auth state
+    telegram_chat_id               TEXT,
+    admin_whatsapp_number          TEXT,
+    admin_channel_preference       admin_channel_pref        NOT NULL DEFAULT 'whatsapp',
+    bot_mode                       BOOLEAN                   NOT NULL DEFAULT TRUE,
+    payment_details                TEXT,
+    -- Tier & notification settings (Phase 1: schema only, no logic yet)
+    notification_tier              notification_tier_type    NOT NULL DEFAULT 'free',
+    notification_channel           notification_channel_type NOT NULL DEFAULT 'dashboard',
+    telegram_bot_token_secret_id   UUID,                     -- FK to vault.secrets (not raw token)
+    notification_quota_used        INT                       NOT NULL DEFAULT 0,
+    notification_quota_reset_at    TIMESTAMPTZ,
+    created_at                     TIMESTAMPTZ               NOT NULL DEFAULT NOW()
 );
 
 -- ── customers ─────────────────────────────────────────────────────────────────
@@ -113,6 +122,41 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conversation_id ON conversation_messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conv_messages_client_id       ON conversation_messages(client_id);
+
+-- ── orders ────────────────────────────────────────────────────────────────────
+-- Durable record for each payment/approval cycle.
+-- Separate from conversations — conversations track dialogue state,
+-- orders track commercial/approval state.
+-- Multiple simultaneous pending orders per customer are supported by design:
+-- no UNIQUE constraint on (customer_id, approval_status).
+
+CREATE TABLE IF NOT EXISTS orders (
+    id                         UUID                      PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id                  UUID                      NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    customer_id                UUID                      NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    conversation_id            UUID                      NOT NULL REFERENCES conversations(id) ON DELETE RESTRICT,
+    product_id                 UUID                      REFERENCES products(id) ON DELETE SET NULL,
+    agreed_price               NUMERIC(12,2)             NOT NULL,
+    screenshot_received_at     TIMESTAMPTZ,              -- set when image message arrives
+    approval_status            order_approval_status     NOT NULL DEFAULT 'pending',
+    approved_by                TEXT,                     -- admin identifier (Telegram user, WA number, etc.)
+    approved_at                TIMESTAMPTZ,
+    notification_channel_used  notification_channel_type,-- which channel notified the admin
+    created_at                 TIMESTAMPTZ               NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_client_id        ON orders(client_id);
+CREATE INDEX IF NOT EXISTS idx_orders_customer_id      ON orders(customer_id);
+CREATE INDEX IF NOT EXISTS idx_orders_conversation_id  ON orders(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_orders_approval_status  ON orders(client_id, approval_status);
+
+-- RLS: service-role key bypasses this entirely — zero impact on existing backend.
+-- Passthrough policy protects future non-service-role access (e.g. admin dashboard).
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "service_role_passthrough" ON orders
+    USING (true)
+    WITH CHECK (true);
 
 -- ── Seed data — test products (safe to re-run, uses DO block) ─────────────────
 -- Replace <YOUR_CLIENT_ID> with the UUID from your clients table.
