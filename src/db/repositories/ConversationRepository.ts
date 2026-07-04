@@ -21,7 +21,7 @@ export class ConversationRepository extends BaseRepository {
   async findActive(clientId: string, customerId: string): Promise<Conversation | null> {
     const { data, error } = await this.getTenantQuery('conversations', clientId)
       .eq('customer_id', customerId)
-      .in('status', ['active', 'negotiating'])
+      .in('status', ['active', 'negotiating', 'awaiting_payment'])
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
