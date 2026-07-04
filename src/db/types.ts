@@ -16,7 +16,7 @@ export type StockStatus            = 'available' | 'out_of_stock';
 export type DeliveryType           = 'digital_link' | 'manual';
 export type ConversationStatus     = 'active' | 'negotiating' | 'awaiting_payment' | 'closed';
 export type ConversationRole       = 'customer' | 'ai' | 'system';
-export type OrderApprovalStatus    = 'pending' | 'approved' | 'rejected';
+export type OrderApprovalStatus    = 'pending' | 'approved' | 'rejected' | 'superseded';
 export type NotificationChannel    = 'dashboard' | 'telegram' | 'whatsapp';
 export type NotificationTier       = 'free' | 'pro' | 'ultra';
 

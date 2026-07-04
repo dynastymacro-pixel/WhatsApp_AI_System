@@ -19,6 +19,7 @@ import {
   ConversationRepository,
   ConversationMessageRepository,
   ProductRepository,
+  OrderRepository,
 } from '../db/repositories';
 import { ClientRepository } from '../db/repositories/ClientRepository';
 import { aiClient, AICompletionRequest, AIMessage } from '../lib/ai/client';
@@ -34,6 +35,7 @@ const convRepo         = new ConversationRepository(supabase);
 const convMsgRepo      = new ConversationMessageRepository(supabase);
 const productRepo      = new ProductRepository(supabase);
 const clientRepo       = new ClientRepository(supabase);
+const orderRepo        = new OrderRepository(supabase);
 
 export interface EngineResult {
   replyText: string;
@@ -178,6 +180,45 @@ export async function processMessage(
           '[Engine] Client has not configured payment_details. Falling back to default message.',
         );
         finalReply.message = `${finalReply.message}\n\nThank you! Our team will send the payment details shortly.`;
+      }
+
+      // Resolve the agreed price — fallback chain: AI offer → last tracked offer → product list price.
+      // If all three are null (misconfigured product), log an error and skip the order insert
+      // rather than throwing — the reply has already been built and must still reach the customer.
+      const resolvedProductId = finalReply.productId ?? conversation.current_product_id ?? null;
+      const agreedPrice       = finalReply.offeredPrice ?? conversation.current_offer ?? activeProduct?.price;
+
+      if (agreedPrice == null) {
+        logger.error(
+          {
+            clientId,
+            conversationId:       conversation.id,
+            customerId,
+            productId:            resolvedProductId,
+            offeredPrice:         finalReply.offeredPrice,
+            currentOffer:         conversation.current_offer,
+            activeProductPrice:   activeProduct?.price,
+          },
+          '[Engine] order_intent fired but agreed_price could not be resolved — ' +
+          'order row NOT created. Check product price configuration.',
+        );
+      } else {
+        const orderResult = await orderRepo.createOrSync(clientId, {
+          customerId,
+          conversationId: conversation.id,
+          productId:      resolvedProductId,
+          agreedPrice,
+        });
+        logger.info(
+          {
+            conversationId: conversation.id,
+            action:         orderResult.action,
+            orderId:        orderResult.order.id,
+            agreedPrice,
+            productId:      resolvedProductId,
+          },
+          '[Engine] Order record createOrSync complete',
+        );
       }
     }
   } else if (isPriceNegotiation) {

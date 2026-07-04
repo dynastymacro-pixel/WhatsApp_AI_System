@@ -10,7 +10,7 @@ CREATE TYPE stock_status_type         AS ENUM ('available', 'out_of_stock');
 CREATE TYPE delivery_type             AS ENUM ('digital_link', 'manual');
 CREATE TYPE conversation_status       AS ENUM ('active', 'negotiating', 'awaiting_payment', 'closed');
 CREATE TYPE conversation_role         AS ENUM ('customer', 'ai', 'system');
-CREATE TYPE order_approval_status     AS ENUM ('pending', 'approved', 'rejected');
+CREATE TYPE order_approval_status     AS ENUM ('pending', 'approved', 'rejected', 'superseded');
 CREATE TYPE notification_channel_type AS ENUM ('dashboard', 'telegram', 'whatsapp');
 CREATE TYPE notification_tier_type    AS ENUM ('free', 'pro', 'ultra');
 

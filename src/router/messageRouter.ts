@@ -14,6 +14,7 @@ import { CustomerRepository } from '../db/repositories/CustomerRepository';
 import { MessageRepository } from '../db/repositories/MessageRepository';
 import { ConversationRepository } from '../db/repositories/ConversationRepository';
 import { ConversationMessageRepository } from '../db/repositories/ConversationMessageRepository';
+import { OrderRepository } from '../db/repositories/OrderRepository';
 import { getSupabaseClient } from '../db/supabase';
 import { enqueueOutgoingMessage } from '../queue/client';
 import { InboundMessage } from '../whatsapp/types';
@@ -25,6 +26,7 @@ const customerRepo  = new CustomerRepository(supabase);
 const messageRepo   = new MessageRepository(supabase);
 const convRepo      = new ConversationRepository(supabase);
 const convMsgRepo   = new ConversationMessageRepository(supabase);
+const orderRepo     = new OrderRepository(supabase);
 
 export async function routeInboundMessage(
   clientId: string,
@@ -65,11 +67,14 @@ export async function routeInboundMessage(
     // A. Resolve or create active conversation
     const conversation = await convRepo.findOrCreate(clientId, customer.id);
 
-    // B. Append customer image placeholder and AI reply to structured conversation history
+    // B. Stamp screenshot_received_at on the pending order (no-op if no order exists yet)
+    await orderRepo.markScreenshotReceived(clientId, conversation.id);
+
+    // C. Append customer image placeholder and AI reply to structured conversation history
     await convMsgRepo.append(clientId, conversation.id, 'customer', '[Customer sent an image]');
     await convMsgRepo.append(clientId, conversation.id, 'ai', replyText);
 
-    // C. Log AI reply to raw messages table
+    // D. Log AI reply to raw messages table
     const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;
     await messageRepo.logMessage({
       clientId,
@@ -80,7 +85,7 @@ export async function routeInboundMessage(
       waMessageId: outboundWaId,
     });
 
-    // D. Enqueue AI reply via BullMQ
+    // E. Enqueue AI reply via BullMQ
     await enqueueOutgoingMessage({
       clientId,
       to:                 msg.from,
