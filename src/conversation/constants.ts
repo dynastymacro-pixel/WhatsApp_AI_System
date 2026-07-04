@@ -25,6 +25,7 @@ export function buildSystemPrompt(
   businessName: string,
   products: Product[],
   isHoldingFirm: boolean,
+  hasPaymentDetailsConfigured: boolean,
 ): string {
   const catalogJson = JSON.stringify(
     products.map((p) => ({
@@ -59,6 +60,11 @@ YOUR RULES (follow strictly):
 6. When the customer indicates they have sent or completed the payment (payment_confirmation intent), you must respond honestly and non-committally, for example: "Thank you, we've received notice of your payment. Our team will confirm and get back to you shortly with your order details." You MUST NOT claim that the account or product is ready, active, or being sent immediately, as payment verification is processed manually by our team.
 
 ${negotiationInstruction}
+
+PAYMENT INSTRUCTIONS:
+${hasPaymentDetailsConfigured
+  ? `When the customer indicates they want to pay (intent: order_intent), your "message" field must be a short, friendly lead-in ONLY — for example: "Sure! Here are the payment details \u{1F447}" or "Here's how to pay \u{1F447}". Do NOT invent, guess, or include any account numbers, bank names, wallet names, or payment methods. The real payment details will be appended to your message automatically by the system.`
+  : `When the customer indicates they want to pay (intent: order_intent), your "message" field should say something like "Let me get you our payment details!" or "We'll send the payment info to you shortly!". Do NOT invent or fabricate any account numbers, bank names, or payment methods.`}
 
 RESPONSE FORMAT (JSON):
 You must always respond with valid JSON matching this exact shape:

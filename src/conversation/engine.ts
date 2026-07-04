@@ -101,7 +101,8 @@ export async function processMessage(
   const isHoldingFirm  = roundsUsed >= config.maxNegotiationRounds;
 
   // ── 6. Build system prompt ────────────────────────────────────────────────
-  const systemPrompt = buildSystemPrompt(businessName, products, isHoldingFirm);
+  const hasPaymentDetails = Boolean(client?.payment_details && client.payment_details.trim().length > 0);
+  const systemPrompt = buildSystemPrompt(businessName, products, isHoldingFirm, hasPaymentDetails);
 
   const aiRequest: AICompletionRequest = {
     systemPrompt,
@@ -170,17 +171,23 @@ export async function processMessage(
 
   // Note: payment_confirmation is deliberately excluded from the append and status logic to avoid resending details.
   if (finalReply.intent === 'order_intent') {
+    // ── Payment details append: always fires on order_intent ─────────────────
+    // Unconditional — the customer sees real payment info every time they ask,
+    // even if the conversation is already awaiting_payment (fixes Root Cause A).
+    if (client?.payment_details && client.payment_details.trim().length > 0) {
+      finalReply.message = `${finalReply.message}\n\n${client.payment_details}`;
+    } else {
+      logger.warn(
+        { clientId, conversationId: conversation.id },
+        '[Engine] Client has not configured payment_details. Falling back to default message.',
+      );
+      finalReply.message = `${finalReply.message}\n\nThank you! Our team will send the payment details shortly.`;
+    }
+
+    // ── Status transition + order DB write: only when not yet awaiting_payment ──
+    // Avoids a redundant status write and duplicate order row on repeat requests.
     if (currentStatus !== 'awaiting_payment') {
-      if (client?.payment_details && client.payment_details.trim().length > 0) {
-        finalReply.message = `${finalReply.message}\n\n${client.payment_details}`;
-        nextStatus = 'awaiting_payment';
-      } else {
-        logger.warn(
-          { clientId, conversationId: conversation.id },
-          '[Engine] Client has not configured payment_details. Falling back to default message.',
-        );
-        finalReply.message = `${finalReply.message}\n\nThank you! Our team will send the payment details shortly.`;
-      }
+      nextStatus = 'awaiting_payment';
 
       // Resolve the agreed price — fallback chain: AI offer → last tracked offer → product list price.
       // If all three are null (misconfigured product), log an error and skip the order insert
