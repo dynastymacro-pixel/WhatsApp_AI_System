@@ -65,7 +65,13 @@ You must always respond with valid JSON matching this exact shape:
   "message": "<your reply to the customer>",
   "offeredPrice": <number if you are quoting/offering a price, omit otherwise>,
   "productId": "<product id from catalog if discussing a specific product, omit otherwise>",
-  "intent": "<one of: greeting | product_inquiry | price_negotiation | order_intent | other>"
+  "intent": "<intent classification of the customer message:
+    - greeting: standard greetings/pleasantries
+    - product_inquiry: asking about product details, description, specs, or availability
+    - price_negotiation: asking for discount, bargaining, or negotiating price
+    - order_intent: expressing intention to buy, confirming they want to purchase, or asking how to pay
+    - payment_confirmation: indicating they have already sent, completed, or processed the payment
+    - other: any other input>"
 }
 
 PRODUCT CATALOG:

@@ -120,18 +120,26 @@ export async function processMessage(
   }
 
   // Reset Gate 2: Product Change Reset
+  // We compute the pre-guardrail price negotiation state so the guardrail in Step 9
+  // receives the correct reset round count.
+  const isPriceNegotiationPre =
+    aiResponse.reply.intent === 'price_negotiation' ||
+    aiResponse.reply.offeredPrice !== undefined;
+
   if (
     productId &&
     conversation.current_product_id &&
-    productId !== conversation.current_product_id
+    productId !== conversation.current_product_id &&
+    (isPriceNegotiationPre || aiResponse.reply.intent === 'order_intent')
   ) {
     logger.info(
       {
         conversationId: conversation.id,
         oldProduct: conversation.current_product_id,
         newProduct: productId,
+        intent: aiResponse.reply.intent,
       },
-      '[Engine] Product changed — resetting status to active and negotiation rounds to 0',
+      '[Engine] Product focus changed to purchase/negotiation cycle — resetting status to active and rounds to 0',
     );
     currentStatus = 'active';
     roundsUsed = 0;
@@ -162,6 +170,7 @@ export async function processMessage(
     finalReply.intent === 'price_negotiation' ||
     finalReply.offeredPrice !== undefined;
 
+  // Note: payment_confirmation is deliberately excluded from the append and status logic to avoid resending details.
   if (finalReply.intent === 'order_intent') {
     if (currentStatus !== 'awaiting_payment') {
       if (client?.payment_details && client.payment_details.trim().length > 0) {

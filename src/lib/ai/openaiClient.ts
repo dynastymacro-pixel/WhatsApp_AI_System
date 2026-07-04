@@ -37,7 +37,7 @@ const OPENAI_RESPONSE_SCHEMA = {
     },
     intent: {
       type: 'string',
-      enum: ['greeting', 'product_inquiry', 'price_negotiation', 'order_intent', 'other'],
+      enum: ['greeting', 'product_inquiry', 'price_negotiation', 'order_intent', 'payment_confirmation', 'other'],
       description: 'Coarse intent classification of this reply.'
     }
   },
