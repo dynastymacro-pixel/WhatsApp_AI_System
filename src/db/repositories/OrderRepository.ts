@@ -28,7 +28,8 @@ export type OrderSyncAction =
   | 'created'
   | 'superseded_and_created'
   | 'price_synced'
-  | 'no_change';
+  | 'no_change'
+  | 'created_alongside_paid_order'; // existing order had screenshot — old row preserved
 
 export interface OrderSyncResult {
   action: OrderSyncAction;
@@ -75,10 +76,30 @@ export class OrderRepository extends BaseRepository {
       return { action: 'no_change', order: existing };
     }
 
-    // Different product — supersede old order, then create new one
-    await this.supersede(clientId, existing.id);
-    const order = await this.create(clientId, data);
-    return { action: 'superseded_and_created', order };
+    // Different product — gate on whether the existing order already has screenshot proof.
+    // No screenshot → customer hasn't submitted payment; safe to supersede.
+    // Screenshot present → a payment has been submitted for this order. NEVER discard that
+    //   evidence. Insert a fresh pending row alongside; leave the paid order untouched.
+    if (existing.screenshot_received_at === null) {
+      await this.supersede(clientId, existing.id);
+      const order = await this.create(clientId, data);
+      return { action: 'superseded_and_created', order };
+    } else {
+      const order = await this.create(clientId, data);
+      logger.info(
+        {
+          clientId,
+          existingOrderId:      existing.id,
+          existingProductId:    existing.product_id,
+          existingScreenshotAt: existing.screenshot_received_at,
+          newOrderId:           order.id,
+          newProductId:         data.productId,
+        },
+        '[OrderRepository] createOrSync: existing order already has a screenshot — ' +
+        'inserting new pending row alongside (paid order preserved, NOT superseded)',
+      );
+      return { action: 'created_alongside_paid_order', order };
+    }
   }
 
   /**
