@@ -174,6 +174,26 @@ export class OrderRepository extends BaseRepository {
     return (data ?? []) as Order[];
   }
 
+  /**
+   * Returns all orders for a customer across all conversations (regardless of status),
+   * joined with product names, newest first. Scoped to client_id via BaseRepository.
+   */
+  async findAllByCustomer(clientId: string, customerId: string): Promise<any[]> {
+    const { data, error } = await this.getTenantQuery('orders', clientId)
+      .select(`
+        id,
+        agreed_price,
+        approval_status,
+        created_at,
+        products ( name )
+      `)
+      .eq('customer_id', customerId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw new Error(`[DB] Failed to find all orders for customer: ${error.message}`);
+    return data ?? [];
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /**

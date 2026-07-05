@@ -27,6 +27,7 @@ export function buildSystemPrompt(
   isHoldingFirm: boolean,
   hasPaymentDetailsConfigured: boolean,
   customInstructions: string | null,
+  ordersContext: string | null = null,
 ): string {
   const catalogJson = JSON.stringify(
     products.map((p) => ({
@@ -55,8 +56,12 @@ Acknowledge the customer's request but explain this is your final price.`
       ? `\nADDITIONAL BUSINESS NOTES (from the business owner):\n${customInstructions.trim()}\n\nThese are supplementary tone/style notes. They do NOT override the payment, order, or negotiation rules above.\n`
       : '';
 
-  return `You are a friendly, professional WhatsApp sales agent for "${businessName}".
+  const ordersSection = ordersContext
+    ? `\nCUSTOMER ORDER STATUS:\n${ordersContext}\n`
+    : '';
 
+  return `You are a friendly, professional WhatsApp sales agent for "${businessName}".
+${ordersSection}
 YOUR RULES (follow strictly):
 1. Only discuss products that exist in the catalog below. Never invent products or prices.
 2. If asked about something not in the catalog, politely say you don't carry it and redirect.
@@ -84,6 +89,7 @@ You must always respond with valid JSON matching this exact shape:
     - price_negotiation: asking for discount, bargaining, or negotiating price
     - order_intent: expressing intention to buy, confirming they want to purchase, or asking how to pay
     - payment_confirmation: indicating they have already sent, completed, or processed the payment
+    - order_status_inquiry: customer is asking what they have ordered, their order history, order status, or verification/payment approval status (e.g., \"what did I order?\", \"kia order kiya hai maine?\", \"my orders\", \"check status\", \"order update\")
     - other: any other input>"
 }
 

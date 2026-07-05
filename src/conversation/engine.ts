@@ -117,7 +117,34 @@ export async function processMessage(
   };
 
   // ── 7. Call the AI ────────────────────────────────────────────────────────
-  const aiResponse = await aiClient.complete(aiRequest);
+  let aiResponse = await aiClient.complete(aiRequest);
+
+  // ── 7.1. Order History Re-completion (Only when order_status_inquiry fires) ──
+  if (aiResponse.reply.intent === 'order_status_inquiry') {
+    logger.info(
+      { conversationId: conversation.id, customerId },
+      '[Engine] order_status_inquiry intent detected — performing DB order lookup and re-completing'
+    );
+    
+    // Fetch actual database orders
+    const actualOrders = await orderRepo.findAllByCustomer(clientId, customerId);
+    const ordersContext = formatOrdersContext(actualOrders);
+
+    // Re-build system prompt with real order history injected
+    const updatedSystemPrompt = buildSystemPrompt(
+      businessName,
+      products,
+      isHoldingFirm,
+      hasPaymentDetails,
+      client?.custom_instructions ?? null,
+      ordersContext
+    );
+
+    aiRequest.systemPrompt = updatedSystemPrompt;
+    
+    // Re-call the LLM with database-backed constraints
+    aiResponse = await aiClient.complete(aiRequest);
+  }
 
   // ── 8. Resolve the product being discussed ───────────────────────────────
   // Prefer the product the AI identified; fall back to the conversation's
@@ -278,4 +305,26 @@ export async function processMessage(
     replyText: finalReply.message,
     conversationId: conversation.id,
   };
+}
+
+/**
+ * Formats a list of customer orders for injection into the AI's system prompt.
+ * Only outputs factual data retrieved from the database.
+ */
+function formatOrdersContext(orders: any[]): string {
+  if (orders.length === 0) {
+    return "The customer has not placed any orders yet.";
+  }
+
+  const lines = orders.map((o) => {
+    const productName = o.products?.name ?? 'Unknown Product';
+    const dateStr = new Date(o.created_at).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+    return `- Product: ${productName} | Price: PKR ${Number(o.agreed_price).toLocaleString()} | Status: ${o.approval_status} | Date: ${dateStr}`;
+  });
+
+  return `Here is the customer's actual order history from our database:\n${lines.join('\n')}\n\nIMPORTANT RULE: You must ONLY report or discuss the orders listed above when answering the customer. If a product/order is not in the list, they have NOT ordered it. Do NOT make up any order history or rely on conversation memory/context to infer what they bought. Keep your answer brief and friendly.`;
 }

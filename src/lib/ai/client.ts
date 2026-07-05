@@ -50,7 +50,7 @@ export interface AIStructuredReply {
   message: string;
   offeredPrice?: number;
   productId?: string;
-  intent: 'greeting' | 'product_inquiry' | 'price_negotiation' | 'order_intent' | 'payment_confirmation' | 'other';
+  intent: 'greeting' | 'product_inquiry' | 'price_negotiation' | 'order_intent' | 'payment_confirmation' | 'order_status_inquiry' | 'other';
 }
 
 export interface AICompletionResponse {
