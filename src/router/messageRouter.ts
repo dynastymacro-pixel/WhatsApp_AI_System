@@ -59,61 +59,111 @@ export async function routeInboundMessage(
   if (msg.contentType === 'image') {
     logger.info(
       { from: msg.from, type: msg.contentType },
-      '[Router] Image message received — sending deterministic payment confirmation acknowledgment',
+      '[Router] Image message received — processing payment screenshot',
     );
 
     const replyText =
       "Thanks for sending that! We've received your screenshot. Our team will confirm your payment and get back to you shortly with your order details.";
 
-    // A. Resolve or create active conversation
-    const conversation = await convRepo.findOrCreate(clientId, customer.id);
+    try {
+      // A. Resolve or create active conversation
+      const conversation = await convRepo.findOrCreate(clientId, customer.id);
 
-    // B. Stamp screenshot_received_at on the pending order (no-op if no order exists yet)
-    const stampedOrder = await orderRepo.markScreenshotReceived(clientId, conversation.id);
+      // B. Stamp screenshot_received_at on the pending order (no-op if no order exists yet)
+      const stampedOrder = await orderRepo.markScreenshotReceived(clientId, conversation.id);
 
-    // C. Fire-and-forget Telegram notification — must never block the customer reply.
-    // .catch() logs unexpected errors that escape notifyAdminOfScreenshot's own try/catch.
-    if (stampedOrder) {
-      notifyAdminOfScreenshot(clientId, {
-        orderId:              stampedOrder.id,
-        customerPhone:        msg.from,
-        productId:            stampedOrder.product_id,
-        agreedPrice:          stampedOrder.agreed_price,
-        screenshotReceivedAt: stampedOrder.screenshot_received_at,
-      }).catch((err) => {
-        logger.error({ err, clientId, orderId: stampedOrder.id },
-          '[Router] notifyAdminOfScreenshot unhandled rejection');
+      // C. Fire-and-forget Telegram notification — must never block the customer reply.
+      // .catch() logs unexpected errors that escape notifyAdminOfScreenshot's own try/catch.
+      if (stampedOrder) {
+        notifyAdminOfScreenshot(clientId, {
+          orderId:              stampedOrder.id,
+          customerPhone:        msg.from,
+          productId:            stampedOrder.product_id,
+          agreedPrice:          stampedOrder.agreed_price,
+          screenshotReceivedAt: stampedOrder.screenshot_received_at,
+        }).catch((err) => {
+          logger.error({ err, clientId, orderId: stampedOrder.id },
+            '[Router] notifyAdminOfScreenshot unhandled rejection');
+        });
+      }
+
+      // D. Append customer image placeholder and AI reply to structured conversation history
+      await convMsgRepo.append(clientId, conversation.id, 'customer', '[Customer sent an image]');
+      await convMsgRepo.append(clientId, conversation.id, 'ai', replyText);
+
+      // E. Log AI reply to raw messages table
+      const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;
+      await messageRepo.logMessage({
+        clientId,
+        customerId:  customer.id,
+        direction:   'outbound',
+        contentType: 'text',
+        content:     replyText,
+        waMessageId: outboundWaId,
       });
+
+      // F. Enqueue AI reply via BullMQ
+      await enqueueOutgoingMessage({
+        clientId,
+        to:                 msg.from,
+        text:               replyText,
+        customerId:         customer.id,
+        replyToWaMessageId: msg.waMessageId,
+      });
+
+      logger.info(
+        { to: msg.from, conversationId: conversation.id, clientId },
+        '[Router] Image acknowledgment reply enqueued',
+      );
+    } catch (err) {
+      const errorDetails = err as Error & { status?: number; statusCode?: number; statusText?: string; code?: string | number };
+      logger.error(
+        {
+          err: errorDetails,
+          message: errorDetails.message,
+          stack: errorDetails.stack,
+          status: errorDetails.status || errorDetails.statusCode,
+          statusText: errorDetails.statusText,
+          code: errorDetails.code,
+          from: msg.from,
+          clientId,
+          customerId: customer.id
+        },
+        '[Router] Exception in image handler — sending fallback receipt reply',
+      );
+
+      const fallbackReply = "Thanks! We've received your image. Our team will verify it and get back to you shortly.";
+
+      try {
+        const outboundWaId = `ai_fallback_${Date.now()}_${customer.id.slice(0, 8)}`;
+        await messageRepo.logMessage({
+          clientId,
+          customerId:  customer.id,
+          direction:   'outbound',
+          contentType: 'text',
+          content:     fallbackReply,
+          waMessageId: outboundWaId,
+        });
+
+        await enqueueOutgoingMessage({
+          clientId,
+          to:                 msg.from,
+          text:               fallbackReply,
+          customerId:         customer.id,
+          replyToWaMessageId: msg.waMessageId,
+        });
+
+        logger.info(
+          { to: msg.from, clientId, customerId: customer.id },
+          '[Router] Fallback image acknowledgment reply enqueued successfully',
+        );
+      } catch (innerErr) {
+        logger.error(
+          { err: innerErr, clientId, customerId: customer.id, from: msg.from },
+          '[Router] CRITICAL: Failed to send fallback receipt reply after image handler exception',
+        );
+      }
     }
-
-    // D. Append customer image placeholder and AI reply to structured conversation history
-    await convMsgRepo.append(clientId, conversation.id, 'customer', '[Customer sent an image]');
-    await convMsgRepo.append(clientId, conversation.id, 'ai', replyText);
-
-    // E. Log AI reply to raw messages table
-    const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;
-    await messageRepo.logMessage({
-      clientId,
-      customerId:  customer.id,
-      direction:   'outbound',
-      contentType: 'text',
-      content:     replyText,
-      waMessageId: outboundWaId,
-    });
-
-    // F. Enqueue AI reply via BullMQ
-    await enqueueOutgoingMessage({
-      clientId,
-      to:                 msg.from,
-      text:               replyText,
-      customerId:         customer.id,
-      replyToWaMessageId: msg.waMessageId,
-    });
-
-    logger.info(
-      { to: msg.from, conversationId: conversation.id, clientId },
-      '[Router] Image acknowledgment reply enqueued',
-    );
     return;
   }
 

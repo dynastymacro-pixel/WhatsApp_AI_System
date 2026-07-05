@@ -152,9 +152,13 @@ export class OrderRepository extends BaseRepository {
     const { data, error } = await this.getTenantQuery('orders', clientId)
       .eq('conversation_id', conversationId)
       .eq('approval_status', 'pending')
-      .maybeSingle();
-    if (error) throw new Error(`[DB] Failed to find pending order by conversation: ${error.message}`);
-    return data as Order | null;
+      .order('created_at', { ascending: false });
+
+    if (error) throw new Error(`[DB] Failed to find pending orders by conversation: ${error.message}`);
+    if (!data || data.length === 0) return null;
+
+    const target = data.find((o: any) => o.screenshot_received_at === null);
+    return (target ?? data[0]) as Order;
   }
 
   /**
