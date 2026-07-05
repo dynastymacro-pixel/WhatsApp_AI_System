@@ -190,49 +190,51 @@ export async function processMessage(
       finalReply.message = `${finalReply.message}\n\nThank you! Our team will send the payment details shortly.`;
     }
 
-    // ── Status transition + order DB write: only when not yet awaiting_payment ──
-    // Avoids a redundant status write and duplicate order row on repeat requests.
+    // ── Status transition: only set if not already awaiting_payment ──────────
+    // Avoids a redundant status write when the customer re-expresses intent.
     if (currentStatus !== 'awaiting_payment') {
       nextStatus = 'awaiting_payment';
+    }
 
-      // Resolve the agreed price — fallback chain: AI offer → last tracked offer → product list price.
-      // If all three are null (misconfigured product), log an error and skip the order insert
-      // rather than throwing — the reply has already been built and must still reach the customer.
-      const resolvedProductId = finalReply.productId ?? conversation.current_product_id ?? null;
-      const agreedPrice       = finalReply.offeredPrice ?? conversation.current_offer ?? activeProduct?.price;
+    // ── Order DB write: always runs on order_intent ───────────────────────────
+    // createOrSync() is idempotent — self-corrects via no-op / price-sync /
+    // supersede. Running it unconditionally ensures an order row always exists
+    // after order_intent, even if the conversation was already awaiting_payment
+    // (e.g. stale conversation state, second payment attempt).
+    const resolvedProductId = finalReply.productId ?? conversation.current_product_id ?? null;
+    const agreedPrice       = finalReply.offeredPrice ?? conversation.current_offer ?? activeProduct?.price;
 
-      if (agreedPrice == null) {
-        logger.error(
-          {
-            clientId,
-            conversationId:       conversation.id,
-            customerId,
-            productId:            resolvedProductId,
-            offeredPrice:         finalReply.offeredPrice,
-            currentOffer:         conversation.current_offer,
-            activeProductPrice:   activeProduct?.price,
-          },
-          '[Engine] order_intent fired but agreed_price could not be resolved — ' +
-          'order row NOT created. Check product price configuration.',
-        );
-      } else {
-        const orderResult = await orderRepo.createOrSync(clientId, {
+    if (agreedPrice == null) {
+      logger.error(
+        {
+          clientId,
+          conversationId:       conversation.id,
           customerId,
+          productId:            resolvedProductId,
+          offeredPrice:         finalReply.offeredPrice,
+          currentOffer:         conversation.current_offer,
+          activeProductPrice:   activeProduct?.price,
+        },
+        '[Engine] order_intent fired but agreed_price could not be resolved — ' +
+        'order row NOT created. Check product price configuration.',
+      );
+    } else {
+      const orderResult = await orderRepo.createOrSync(clientId, {
+        customerId,
+        conversationId: conversation.id,
+        productId:      resolvedProductId,
+        agreedPrice,
+      });
+      logger.info(
+        {
           conversationId: conversation.id,
-          productId:      resolvedProductId,
+          action:         orderResult.action,
+          orderId:        orderResult.order.id,
           agreedPrice,
-        });
-        logger.info(
-          {
-            conversationId: conversation.id,
-            action:         orderResult.action,
-            orderId:        orderResult.order.id,
-            agreedPrice,
-            productId:      resolvedProductId,
-          },
-          '[Engine] Order record createOrSync complete',
-        );
-      }
+          productId:      resolvedProductId,
+        },
+        '[Engine] Order record createOrSync complete',
+      );
     }
   } else if (isPriceNegotiation) {
     nextStatus = 'negotiating';
