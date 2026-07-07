@@ -198,9 +198,15 @@ export async function notifyAdmin(
       }
     }
 
-    if (channelsFired.length === 0 && overallStatus !== 'failed') {
-      overallStatus = 'skipped';
-      failureReason = 'no_channel_configured';
+    if (channelsFired.length === 0) {
+      overallStatus = 'failed';
+      if (!failureReason) {
+        if (pref === 'both') {
+          failureReason = 'both_channels_failed';
+        } else {
+          failureReason = 'no_channel_configured';
+        }
+      }
     }
 
     const channelLabel = channelsFired.join('+') || 'none';
