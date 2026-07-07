@@ -7,6 +7,26 @@ import { MessageRepository } from '../db/repositories/MessageRepository';
 import { notifyAdmin } from '../services/notificationService';
 import { logger } from '../utils/logger';
 
+// Helper to classify transient connection/infrastructure issues
+function isConnectionError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err.message || '');
+  const code = String(err.code || '');
+
+  return (
+    msg.includes('[BaileysAdapter] Cannot send message — not connected') ||
+    msg.includes('[WhatsAppManager] No adapter found') ||
+    msg.includes('sendMessage timed out') ||
+    msg.includes('connection lost') ||
+    msg.includes('fetch failed') ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND'
+  );
+}
+
 let _deliveryWorker: Worker | null = null;
 
 export function startDeliveryWorker(): Worker {
@@ -224,34 +244,100 @@ export function startDeliveryWorker(): Worker {
       } catch (sendError: any) {
         logger.error({ orderId, error: sendError.message }, '[DeliveryWorker] WhatsApp send failure');
 
-        const currentAttempts = order.delivery_attempts + 1;
+        if (isConnectionError(sendError)) {
+          // --- Connection/Infrastructure Failure ---
 
-        if (currentAttempts < 4) {
-          // Retry with backoff: attempt 2 (+10s), attempt 3 (+30s), attempt 4 (+90s)
-          let delayMs = 10000; // default retry 1 (10s)
-          if (currentAttempts === 2) delayMs = 30000;  // retry 2 (30s)
-          if (currentAttempts === 3) delayMs = 90000;  // retry 3 (90s)
+          // Retrieve the earliest connection failure alert for this order to compute the 24h threshold
+          const { data: firstAlert } = await supabase
+            .from('admin_notification_log')
+            .select('sent_at')
+            .eq('order_id', orderId)
+            .eq('event_type', 'delivery_failure')
+            .order('sent_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
 
-          logger.info({ orderId, nextAttempt: currentAttempts + 1, delayMs }, '[DeliveryWorker] Scheduling retry');
-          await enqueueDeliveryJob({ orderId, clientId }, delayMs);
-        } else {
-          // Exhausted 3 retries (4 total attempts)
-          logger.error({ orderId }, '[DeliveryWorker] Delivery failed after 3 retries. Releasing item...');
+          const firstFailureTime = firstAlert ? new Date(firstAlert.sent_at).getTime() : 0;
+          const isStuckTooLong = firstFailureTime > 0 && (Date.now() - firstFailureTime > 24 * 60 * 60 * 1000);
 
-          // Call atomic release transaction RPC
-          const { error: releaseErr } = await supabase.rpc('release_delivery_item_on_failure', {
-            p_order_id: orderId,
-          });
+          if (isStuckTooLong) {
+            logger.error(
+              { orderId, firstFailureTime: firstAlert?.sent_at }, 
+              '[DeliveryWorker] Connection offline for >24h. Releasing item and failing order.'
+            );
+            
+            await supabase.rpc('release_delivery_item_on_failure', {
+              p_order_id: orderId,
+            });
 
-          if (releaseErr) {
-            logger.error({ orderId, err: releaseErr.message }, '[DeliveryWorker] Failed to execute release_delivery_item_on_failure RPC');
+            await notifyAdmin('delivery_failure', clientId, {
+              orderId,
+              details: `Session down for >24 hours since first failure. Delivery cancelled and inventory released.`,
+            });
+            return;
           }
 
-          // Alert admin via configured channel (Telegram / WhatsApp / both)
-          await notifyAdmin('delivery_failure', clientId, {
-            orderId,
-            details: `Delivery failed after 3 retries. WhatsApp error: ${sendError.message}`,
-          });
+          // Otherwise, retain inventory and delay retry by 5 minutes (setting lock to 3 minutes in the future)
+          const retryLockTime = new Date(Date.now() + 3 * 60 * 1000).toISOString();
+          
+          await supabase
+            .from('orders')
+            .update({
+              delivery_status: 'pending',
+              delivery_attempts: order.delivery_attempts, // Restore original count
+              delivery_locked_at: retryLockTime
+            })
+            .eq('id', orderId);
+
+          logger.warn(
+            { orderId, retryAt: retryLockTime },
+            '[DeliveryWorker] Connection failure. Retaining inventory and delaying retry.'
+          );
+
+          // Alert admin but throttle to once every 20 minutes
+          const { data: lastAlert } = await supabase
+            .from('admin_notification_log')
+            .select('sent_at')
+            .eq('order_id', orderId)
+            .eq('event_type', 'delivery_failure')
+            .order('sent_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          const shouldAlert = !lastAlert || 
+            (Date.now() - new Date(lastAlert.sent_at).getTime() > 20 * 60 * 1000);
+
+          if (shouldAlert) {
+            await notifyAdmin('delivery_failure', clientId, {
+              orderId,
+              details: `Bot disconnected — WhatsApp connection is offline. Order delivery is stuck. (Error: ${sendError.message})`,
+            });
+          }
+
+        } else {
+          // --- Content/Data Failure ---
+          const currentAttempts = order.delivery_attempts + 1;
+
+          if (currentAttempts < 4) {
+            let delayMs = 10000;
+            if (currentAttempts === 2) delayMs = 30000;
+            if (currentAttempts === 3) delayMs = 90000;
+
+            logger.info({ orderId, nextAttempt: currentAttempts + 1, delayMs }, '[DeliveryWorker] Scheduling retry');
+            await enqueueDeliveryJob({ orderId, clientId }, delayMs);
+          } else {
+            // Exhausted attempts
+            logger.error({ orderId }, '[DeliveryWorker] Delivery failed after 3 retries. Releasing item...');
+
+            await supabase.rpc('release_delivery_item_on_failure', {
+              p_order_id: orderId,
+            });
+
+            await notifyAdmin('delivery_failure', clientId, {
+              orderId,
+              details: `Delivery failed after 3 retries. WhatsApp error: ${sendError.message}`,
+            });
+          }
         }
       }
     },
