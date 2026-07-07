@@ -24,7 +24,7 @@ import { startOutgoingWorker, stopOutgoingWorker } from './queue/worker';
 import { startDeliveryWorker, stopDeliveryWorker } from './queue/deliveryWorker';
 import { getSupabaseClient } from './db/supabase';
 import { enqueueDeliveryJob } from './queue/deliveryQueue';
-import { initWhatsAppClient, getAllAdapters } from './whatsapp/manager';
+import { initWhatsAppClient, getAllAdapters, removeWhatsAppClient } from './whatsapp/manager';
 import { registerBaileysWebhook } from './webhooks/baileys';
 import { startQrServer, stopQrServer } from './whatsapp/qrServer';
 
@@ -36,7 +36,37 @@ function startDeliveryListener() {
     try {
       const supabase = getSupabaseClient();
       
-      // Atomically claim and lock the next pending order
+      // ── 1. Poll and claim WhatsApp pairing connection requests ─────────────
+      const { data: connectionRequest, error: connErr } = await supabase.rpc('claim_next_connection_request');
+
+      if (connErr) {
+        logger.error({ err: connErr.message }, '[DeliveryListener] claim_next_connection_request RPC failed');
+      } else if (connectionRequest && (connectionRequest as any[]).length > 0) {
+        const clientRow = (connectionRequest as any[])[0];
+        const clientId = clientRow.id;
+        
+        logger.info({ clientId }, '[DeliveryListener] Claimed connection request. Initialising adapter...');
+        
+        try {
+          // Tear down any stale active connection/adapter first
+          await removeWhatsAppClient(clientId);
+          
+          // Connect fresh adapter
+          const adapter = await initWhatsAppClient(clientId);
+          
+          // Wire up inbound webhook
+          registerBaileysWebhook(adapter, clientId);
+        } catch (err: any) {
+          logger.error({ clientId, err: err.message }, '[DeliveryListener] Failed to initialize adapter on request');
+          // Reset status back to disconnected so user can retry
+          await supabase
+            .from('clients')
+            .update({ wa_connection_status: 'disconnected' })
+            .eq('id', clientId);
+        }
+      }
+
+      // ── 2. Atomically claim and lock the next pending order ──────────────────
       const { data: claimedOrder, error } = await supabase.rpc('claim_next_delivery_order');
 
       if (error) {

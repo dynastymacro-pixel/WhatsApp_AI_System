@@ -33,6 +33,8 @@ import { logger } from '../utils/logger';
 type InboundHandler = (msg: InboundMessage) => Promise<void>;
 
 export class BaileysAdapter implements IWhatsAppAdapter {
+  private static activeInstances = new Map<string, BaileysAdapter>();
+
   private sock: WASocket | null = null;
   private connected = false;
   private readonly clientId: string;
@@ -44,6 +46,31 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
   constructor(clientId: string) {
     this.clientId = clientId;
+  }
+
+  /** Checks if this instance is currently the active adapter for its clientId in the manager. */
+  isActiveAdapter(): boolean {
+    return BaileysAdapter.activeInstances.get(this.clientId) === this;
+  }
+
+  /** Cleanly shuts down the socket connection, clearing health check interval and registry entry. */
+  async close(): Promise<void> {
+    if (BaileysAdapter.activeInstances.get(this.clientId) === this) {
+      BaileysAdapter.activeInstances.delete(this.clientId);
+    }
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+    this.connected = false;
+    resetPaired();
+    try {
+      this.sock?.end(undefined);
+    } catch (err: any) {
+      logger.error({ err: err.message, clientId: this.clientId }, '[WhatsApp] Error ending socket in close()');
+    }
+    this.sock = null;
+    this.connectionPromise = null;
   }
 
   /** Register a handler to be called when an inbound message arrives. */
@@ -136,14 +163,26 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       return this.connectionPromise;
     }
 
+    // ── 1. Static Registry Management ────────────────────────────────────────
+    // If there is an existing adapter registered for this client, cleanly close it first
+    const existing = BaileysAdapter.activeInstances.get(this.clientId);
+    if (existing && existing !== this) {
+      logger.warn({ clientId: this.clientId }, '[WhatsApp] Displacing existing adapter instance in static registry');
+      await existing.close();
+    }
+    // Register ourselves as the active adapter instance
+    BaileysAdapter.activeInstances.set(this.clientId, this);
+
     this.connectionPromise = (async () => {
       // ── Connection Health logger (every 60s) ─────────────────────────────────
       if (!this.healthCheckInterval) {
         this.healthCheckInterval = setInterval(() => {
-          logger.info(
-            { clientId: this.clientId, connected: this.connected },
-            `[WhatsApp] Healthcheck — Connection state: ${this.connected ? 'CONNECTED' : 'DISCONNECTED'}`,
-          );
+          if (this.isActiveAdapter()) {
+            logger.info(
+              { clientId: this.clientId, connected: this.connected },
+              `[WhatsApp] Healthcheck — Connection state: ${this.connected ? 'CONNECTED' : 'DISCONNECTED'}`,
+            );
+          }
         }, 60000);
       }
 
@@ -166,7 +205,11 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       this.sock = sock;
 
       // ── Auth state persistence ───────────────────────────────────────────────
-      sock.ev.on('creds.update', saveCreds);
+      sock.ev.on('creds.update', () => {
+        if (this.isActiveAdapter()) {
+          saveCreds();
+        }
+      });
 
       // ── Connection & QR handling ─────────────────────────────────────────────
       sock.ev.on('connection.update', async (update) => {
@@ -189,12 +232,45 @@ export class BaileysAdapter implements IWhatsAppAdapter {
             { url: `http://localhost:${config.qrServerPort}/qr` },
             '[WhatsApp] Open /qr in your browser to scan a proper QR image',
           );
+
+          // ── Layer 4: DB Sync for Multi-Tenant dashboard pairing ───────────────
+          if (this.isActiveAdapter()) {
+            try {
+              const supabase = getSupabaseClient();
+              await supabase
+                .from('clients')
+                .update({
+                  wa_qr_data: qr,
+                  wa_qr_last_emitted_at: new Date().toISOString(),
+                  wa_connection_status: 'connecting',
+                })
+                .eq('id', this.clientId);
+            } catch (dbErr: any) {
+              logger.error({ err: dbErr.message, clientId: this.clientId }, '[WhatsApp] Failed to save QR to DB');
+            }
+          }
         }
 
         if (connection === 'open') {
           this.connected = true;
           markPaired();
           logger.info({ clientId: this.clientId }, '[WhatsApp] ✅ Connected');
+
+          if (this.isActiveAdapter()) {
+            try {
+              const supabase = getSupabaseClient();
+              await supabase
+                .from('clients')
+                .update({
+                  wa_qr_data: null,
+                  wa_qr_last_emitted_at: null,
+                  wa_connection_status: 'connected',
+                })
+                .eq('id', this.clientId);
+            } catch (dbErr: any) {
+              logger.error({ err: dbErr.message, clientId: this.clientId }, '[WhatsApp] Failed to update connected state in DB');
+            }
+          }
         }
 
         if (connection === 'close') {
@@ -211,37 +287,58 @@ export class BaileysAdapter implements IWhatsAppAdapter {
           if (shouldReconnect) {
             logger.info('[WhatsApp] Reconnecting in 5s...');
             setTimeout(() => {
-              this.connect().catch((err: Error) => {
-                logger.error({ err: err.message, clientId: this.clientId }, '[WhatsApp] Auto-reconnect failed');
-              });
+              if (this.isActiveAdapter()) {
+                this.connect().catch((err: Error) => {
+                  logger.error({ err: err.message, clientId: this.clientId }, '[WhatsApp] Auto-reconnect failed');
+                });
+              }
             }, 5000);
+
+            if (this.isActiveAdapter()) {
+              try {
+                const supabase = getSupabaseClient();
+                await supabase
+                  .from('clients')
+                  .update({ wa_connection_status: 'disconnected' })
+                  .eq('id', this.clientId);
+              } catch (dbErr: any) {
+                logger.error({ err: dbErr.message, clientId: this.clientId }, '[WhatsApp] Failed to set disconnected state in DB');
+              }
+            }
           } else {
             logger.error(
-              '[WhatsApp] Logged out — clearing wa_session_data in DB to trigger fresh pairing.',
+              '[WhatsApp] Logged out — clearing wa_session_data and status in DB to trigger fresh pairing.',
             );
-            try {
-              const supabase = getSupabaseClient();
-              const { error } = await supabase
-                .from('clients')
-                .update({ wa_session_data: null })
-                .eq('id', this.clientId);
+            if (this.isActiveAdapter()) {
+              try {
+                const supabase = getSupabaseClient();
+                const { error } = await supabase
+                  .from('clients')
+                  .update({
+                    wa_session_data: null,
+                    wa_qr_data: null,
+                    wa_qr_last_emitted_at: null,
+                    wa_connection_status: 'disconnected',
+                  })
+                  .eq('id', this.clientId);
 
-              if (error) {
+                if (error) {
+                  logger.error(
+                    { err: error.message, clientId: this.clientId },
+                    '[WhatsApp] Failed to clear session data on logout event',
+                  );
+                } else {
+                  logger.info(
+                    { clientId: this.clientId },
+                    '[WhatsApp] Successfully cleared session data on logout event ✓',
+                  );
+                }
+              } catch (dbErr: any) {
                 logger.error(
-                  { err: error.message, clientId: this.clientId },
-                  '[WhatsApp] Failed to clear wa_session_data on logout event',
-                );
-              } else {
-                logger.info(
-                  { clientId: this.clientId },
-                  '[WhatsApp] Successfully cleared wa_session_data on logout event ✓',
+                  { err: dbErr.message, clientId: this.clientId },
+                  '[WhatsApp] Error database query during logout cleanup',
                 );
               }
-            } catch (dbErr: any) {
-              logger.error(
-                { err: dbErr.message, clientId: this.clientId },
-                '[WhatsApp] Error database query during logout cleanup',
-              );
             }
           }
         }
@@ -250,6 +347,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       // ── Incoming messages ────────────────────────────────────────────────────
       sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return; // skip history sync bulk
+        if (!this.isActiveAdapter()) return;
 
         for (const msg of messages) {
           if (!msg.message || msg.key?.fromMe) continue; // skip our own sent messages

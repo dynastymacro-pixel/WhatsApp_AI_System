@@ -4,6 +4,7 @@
 
 import { BaileysAdapter } from './adapter';
 import { IWhatsAppAdapter } from './types';
+import { logger } from '../utils/logger';
 
 const adapters = new Map<string, BaileysAdapter>();
 
@@ -20,6 +21,22 @@ export async function initWhatsAppClient(clientId: string): Promise<BaileysAdapt
   adapters.set(clientId, adapter);
   await adapter.connect();
   return adapter;
+}
+
+/**
+ * Cleanly closes and removes a WhatsApp adapter connection for a given clientId.
+ * Prevents socket descriptor leaks and session overlapping during connection retries.
+ */
+export async function removeWhatsAppClient(clientId: string): Promise<void> {
+  const adapter = adapters.get(clientId);
+  if (adapter) {
+    logger.info({ clientId }, '[WhatsAppManager] Cleaning up and closing existing WhatsApp connection');
+    await adapter.close();
+    adapters.delete(clientId);
+    // 500ms sleep to allow OS to completely close the websocket TCP socket
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    logger.info({ clientId }, '[WhatsAppManager] Existing WhatsApp connection successfully closed and removed');
+  }
 }
 
 /**
