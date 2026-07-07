@@ -13,7 +13,7 @@ export type BotMode = boolean;
 
 export type MessageDirection       = 'inbound' | 'outbound';
 export type StockStatus            = 'available' | 'out_of_stock';
-export type DeliveryType           = 'digital_link' | 'manual';
+export type DeliveryType           = 'digital_link' | 'manual' | 'inventory';
 export type ConversationStatus     = 'active' | 'negotiating' | 'awaiting_payment' | 'closed';
 export type ConversationRole       = 'customer' | 'ai' | 'system';
 export type OrderApprovalStatus    = 'pending' | 'approved' | 'rejected' | 'superseded';
@@ -72,6 +72,7 @@ export interface Product {
   min_price: number;
   stock_status: StockStatus;
   delivery_type: DeliveryType;
+  delivery_content: string | null;
   created_at: string;
 }
 
@@ -113,5 +114,21 @@ export interface Order {
   approved_by: string | null;          // admin identifier (Telegram user, WA number, etc.)
   approved_at: string | null;
   notification_channel_used: NotificationChannel | null;
+  delivery_status: 'not_applicable' | 'pending' | 'delivered' | 'failed';
+  delivery_attempts: number;
+  delivered_at: string | null;
+  delivery_locked_at: string | null;
+  delivery_item_id: string | null;
+  created_at: string;
+}
+
+export interface ProductDeliveryItem {
+  id: string;
+  product_id: string;
+  content_encrypted: string; // secret_name in Vault
+  status: 'available' | 'reserved' | 'delivered';
+  order_id: string | null;
+  reserved_at: string | null;
+  delivered_at: string | null;
   created_at: string;
 }

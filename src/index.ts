@@ -21,9 +21,51 @@ import { logger } from './utils/logger';
 logger.info({ env: config.nodeEnv }, '[ZapSell] Starting...');
 
 import { startOutgoingWorker, stopOutgoingWorker } from './queue/worker';
+import { startDeliveryWorker, stopDeliveryWorker } from './queue/deliveryWorker';
+import { getSupabaseClient } from './db/supabase';
+import { enqueueDeliveryJob } from './queue/deliveryQueue';
 import { initWhatsAppClient, getAllAdapters } from './whatsapp/manager';
 import { registerBaileysWebhook } from './webhooks/baileys';
 import { startQrServer, stopQrServer } from './whatsapp/qrServer';
+
+let pollingInterval: NodeJS.Timeout | null = null;
+
+function startDeliveryListener() {
+  logger.info('[DeliveryListener] Starting database polling loop...');
+  pollingInterval = setInterval(async () => {
+    try {
+      const supabase = getSupabaseClient();
+      
+      // Atomically claim and lock the next pending order
+      const { data: claimedOrder, error } = await supabase.rpc('claim_next_delivery_order');
+
+      if (error) {
+        logger.error({ err: error.message }, '[DeliveryListener] claim_next_delivery_order RPC failed');
+        return;
+      }
+
+      if (claimedOrder && (claimedOrder as any[]).length > 0) {
+        const order = (claimedOrder as any[])[0];
+        logger.info({ orderId: order.id, clientId: order.client_id }, '[DeliveryListener] Locked next pending order for delivery');
+        
+        await enqueueDeliveryJob({
+          orderId: order.id,
+          clientId: order.client_id,
+        });
+      }
+    } catch (err: any) {
+      logger.error({ err: err.message }, '[DeliveryListener] Unexpected error in polling loop');
+    }
+  }, 3000); // Poll database every 3 seconds
+}
+
+function stopDeliveryListener() {
+  if (pollingInterval) {
+    clearInterval(pollingInterval);
+    pollingInterval = null;
+    logger.info('[DeliveryListener] Polling loop stopped.');
+  }
+}
 
 async function main(): Promise<void> {
   // ── Step 1: Start the QR pairing server ──────────────────────────────────
@@ -31,10 +73,12 @@ async function main(): Promise<void> {
   // where ASCII QR codes in logs are often unreadable.
   startQrServer();
 
-  // ── Step 2: Start the outgoing message worker ────────────────────────────
+  // ── Step 2: Start the workers & listeners ────────────────────────────────
   startOutgoingWorker();
+  startDeliveryWorker();
+  startDeliveryListener();
 
-  // ── Step 2: Connect WhatsApp for the default client ──────────────────────
+  // ── Step 3: Connect WhatsApp for the default client ──────────────────────
   // Day 1: Single-tenant boot using DEFAULT_CLIENT_ID.
   // Multi-tenant: load all active clients from DB and call initWhatsAppClient()
   // for each one. That extension is straightforward — the manager supports it.
@@ -43,7 +87,7 @@ async function main(): Promise<void> {
 
   const adapter = await initWhatsAppClient(clientId);
 
-  // ── Step 3: Register the inbound message handler ──────────────────────────
+  // ── Step 4: Register the inbound message handler ──────────────────────────
   registerBaileysWebhook(adapter, clientId);
 
   logger.info('[ZapSell] ✅ Boot complete — waiting for WhatsApp connection...');
@@ -56,6 +100,9 @@ async function main(): Promise<void> {
 
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, '[ZapSell] Shutting down gracefully...');
+
+  // Stop the database listener polling loop
+  stopDeliveryListener();
 
   // Flush Baileys session data for all active adapters
   const adapters = getAllAdapters();
@@ -72,8 +119,9 @@ async function shutdown(signal: string): Promise<void> {
     }),
   );
 
-  // Stop the BullMQ worker cleanly
+  // Stop the BullMQ workers cleanly
   await stopOutgoingWorker();
+  await stopDeliveryWorker();
 
   // Stop the QR server
   await stopQrServer();
