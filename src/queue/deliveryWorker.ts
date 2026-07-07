@@ -4,6 +4,7 @@ import { createRedisConnection } from './client';
 import { DeliveryJobData, DELIVERY_JOB_NAME, DELIVERY_QUEUE_NAME, enqueueDeliveryJob } from './deliveryQueue';
 import { getWhatsAppClient } from '../whatsapp/manager';
 import { MessageRepository } from '../db/repositories/MessageRepository';
+import { notifyAdmin } from '../services/notificationService';
 import { logger } from '../utils/logger';
 
 let _deliveryWorker: Worker | null = null;
@@ -122,8 +123,11 @@ export function startDeliveryWorker(): Worker {
               .update({ delivery_status: 'failed' })
               .eq('id', orderId);
 
-            // Alert admin via Telegram bot
-            await sendTelegramDeliveryAlert(clientId, orderId, 'No inventory items available in stock.');
+            // Alert admin via configured channel (Telegram / WhatsApp / both)
+            await notifyAdmin('delivery_failure', clientId, {
+              orderId,
+              details: 'No inventory items available in stock.',
+            });
             return;
           }
 
@@ -243,8 +247,11 @@ export function startDeliveryWorker(): Worker {
             logger.error({ orderId, err: releaseErr.message }, '[DeliveryWorker] Failed to execute release_delivery_item_on_failure RPC');
           }
 
-          // Alert admin via Telegram bot
-          await sendTelegramDeliveryAlert(clientId, orderId, `Delivery failed after 3 retries. WhatsApp error: ${sendError.message}`);
+          // Alert admin via configured channel (Telegram / WhatsApp / both)
+          await notifyAdmin('delivery_failure', clientId, {
+            orderId,
+            details: `Delivery failed after 3 retries. WhatsApp error: ${sendError.message}`,
+          });
         }
       }
     },
@@ -266,52 +273,9 @@ export function startDeliveryWorker(): Worker {
   return _deliveryWorker;
 }
 
-/**
- * Sends a Telegram notification to the client's configured admin bot/chat alert channel.
- */
-async function sendTelegramDeliveryAlert(clientId: string, orderId: string, details: string): Promise<void> {
-  const supabase = getSupabaseClient();
-  try {
-    const { data: client, error } = await supabase
-      .from('clients')
-      .select('telegram_chat_id, telegram_bot_token_secret_id')
-      .eq('id', clientId)
-      .single();
-
-    if (error || !client || !client.telegram_chat_id || !client.telegram_bot_token_secret_id) {
-      return;
-    }
-
-    const { data: botToken, error: decErr } = await supabase.rpc('get_decrypted_secret', {
-      secret_name: `telegram_token_${clientId}`,
-    });
-
-    if (decErr || !botToken) {
-      return;
-    }
-
-    const message = [
-      '🚨 *ZapSell Product Delivery Failure*',
-      '',
-      `*Order ID:* \`${orderId}\``,
-      `*Details:* ${details}`,
-      '',
-      `_Manual attention is required. Open the dashboard to retry._`
-    ].join('\n');
-
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: client.telegram_chat_id,
-        text: message,
-        parse_mode: 'Markdown',
-      }),
-    });
-  } catch (err: any) {
-    logger.error({ orderId, err: err.message }, '[DeliveryWorker] Failed to send Telegram alert');
-  }
-}
+// sendTelegramDeliveryAlert() removed in Sub-Phase 3C.
+// Delivery failure alerts now route through notifyAdmin() in notificationService.ts,
+// which handles Telegram, WhatsApp, and 'both' based on client.admin_channel_preference.
 
 export async function stopDeliveryWorker(): Promise<void> {
   if (_deliveryWorker) {

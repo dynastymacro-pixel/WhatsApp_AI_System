@@ -26,6 +26,7 @@ import { aiClient, AICompletionRequest, AIMessage } from '../lib/ai/client';
 import { applyNegotiationGuardrail } from './negotiationGuardrail';
 import { buildSystemPrompt, CONVERSATION_HISTORY_LIMIT } from './constants';
 import { Product, Conversation, ConversationMessage } from '../db/types';
+import { notifyAdmin } from '../services/notificationService';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
@@ -45,11 +46,16 @@ export interface EngineResult {
 /**
  * Process one inbound text message through the full AI conversation pipeline.
  * Returns the reply text to be sent back to the customer via BullMQ.
+ *
+ * @param customerPhone  Optional E.164 phone number (msg.from from messageRouter).
+ *                       Threaded through to avoid a redundant DB lookup inside
+ *                       notifyAdmin() when firing the order_created alert.
  */
 export async function processMessage(
-  clientId: string,
-  customerId: string,
-  inboundText: string,
+  clientId:      string,
+  customerId:    string,
+  inboundText:   string,
+  customerPhone?: string,
 ): Promise<EngineResult> {
 
   // ── 1. Load or create conversation ───────────────────────────────────────
@@ -262,6 +268,26 @@ export async function processMessage(
         },
         '[Engine] Order record createOrSync complete',
       );
+
+      // Fire order_created alert only on genuinely new order rows.
+      // 'price_synced' and 'no_change' do not re-alert — admin already knows about this order.
+      // Fire-and-forget: failure must never surface into the customer reply flow.
+      if (
+        orderResult.action === 'created' ||
+        orderResult.action === 'superseded_and_created'
+      ) {
+        notifyAdmin('order_created', clientId, {
+          orderId:       orderResult.order.id,
+          customerPhone: customerPhone ?? undefined,
+          productName:   activeProduct?.name ?? null,
+          agreedPrice,
+        }).catch((err: Error) =>
+          logger.error(
+            { err: err.message, orderId: orderResult.order.id },
+            '[Engine] notifyAdmin order_created unhandled rejection',
+          ),
+        );
+      }
     }
   } else if (isPriceNegotiation) {
     nextStatus = 'negotiating';

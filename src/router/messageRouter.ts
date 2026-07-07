@@ -180,7 +180,7 @@ export async function routeInboundMessage(
   let conversationId: string;
 
   try {
-    const result = await processMessage(clientId, customer.id, msg.text.trim());
+    const result = await processMessage(clientId, customer.id, msg.text.trim(), msg.from);
     replyText      = result.replyText;
     conversationId = result.conversationId;
   } catch (err) {

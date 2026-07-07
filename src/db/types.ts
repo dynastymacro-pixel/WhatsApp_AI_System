@@ -132,3 +132,19 @@ export interface ProductDeliveryItem {
   delivered_at: string | null;
   created_at: string;
 }
+
+// ── Phase 3C: Admin Notification Log ──────────────────────────────────────────
+// Append-only audit trail for every admin alert attempted.
+// RLS: service_role only. Any dashboard read path must add client-scoped policy first.
+
+export interface AdminNotificationLog {
+  id:             string;
+  client_id:      string;
+  event_type:     'screenshot_received' | 'delivery_failure' | 'order_created';
+  channel:        string;  // 'telegram' | 'whatsapp' | 'both' | 'telegram_fallback' | 'skipped'
+  order_id:       string | null;
+  payload:        Record<string, unknown> | null;
+  status:         'sent' | 'failed' | 'skipped';
+  failure_reason: string | null;
+  sent_at:        string;
+}
