@@ -26,6 +26,7 @@ import qrcodeTerminal from 'qrcode-terminal';
 import { IWhatsAppAdapter, InboundMessage } from './types';
 import { useSupabaseAuthState } from './auth';
 import { setQrData, markPaired, resetPaired } from './qrServer';
+import { getSupabaseClient } from '../db/supabase';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
@@ -216,8 +217,32 @@ export class BaileysAdapter implements IWhatsAppAdapter {
             }, 5000);
           } else {
             logger.error(
-              '[WhatsApp] Logged out — clear wa_session_data in DB and restart to re-pair.',
+              '[WhatsApp] Logged out — clearing wa_session_data in DB to trigger fresh pairing.',
             );
+            try {
+              const supabase = getSupabaseClient();
+              const { error } = await supabase
+                .from('clients')
+                .update({ wa_session_data: null })
+                .eq('id', this.clientId);
+
+              if (error) {
+                logger.error(
+                  { err: error.message, clientId: this.clientId },
+                  '[WhatsApp] Failed to clear wa_session_data on logout event',
+                );
+              } else {
+                logger.info(
+                  { clientId: this.clientId },
+                  '[WhatsApp] Successfully cleared wa_session_data on logout event ✓',
+                );
+              }
+            } catch (dbErr: any) {
+              logger.error(
+                { err: dbErr.message, clientId: this.clientId },
+                '[WhatsApp] Error database query during logout cleanup',
+              );
+            }
           }
         }
       });
