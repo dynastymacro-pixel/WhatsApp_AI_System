@@ -293,18 +293,6 @@ export class BaileysAdapter implements IWhatsAppAdapter {
                 });
               }
             }, 5000);
-
-            if (this.isActiveAdapter()) {
-              try {
-                const supabase = getSupabaseClient();
-                await supabase
-                  .from('clients')
-                  .update({ wa_connection_status: 'disconnected' })
-                  .eq('id', this.clientId);
-              } catch (dbErr: any) {
-                logger.error({ err: dbErr.message, clientId: this.clientId }, '[WhatsApp] Failed to set disconnected state in DB');
-              }
-            }
           } else {
             logger.error(
               '[WhatsApp] Logged out — clearing wa_session_data and status in DB to trigger fresh pairing.',
