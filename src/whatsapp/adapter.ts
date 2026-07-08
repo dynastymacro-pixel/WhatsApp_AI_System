@@ -120,7 +120,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
     );
 
     try {
-      await Promise.race([sendPromise, timeoutPromise]);
+      const result = await Promise.race([sendPromise, timeoutPromise]);
+      console.log('[BaileysAdapter] sendMessage resolved with:', JSON.stringify(result));
     } catch (err: any) {
       // If it's our explicit timeout error, trigger a reconnect
       if (err.message?.includes('sendMessage timed out')) {
