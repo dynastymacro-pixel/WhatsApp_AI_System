@@ -142,6 +142,7 @@ export async function notifyAdmin(
 
     // ── 4. Fire channels ──────────────────────────────────────────────────────
     const channelsFired: string[] = [];
+    const errors: string[] = [];
     let   overallStatus: 'sent' | 'failed' | 'skipped' = 'sent';
     let   failureReason: string | null = null;
 
@@ -179,10 +180,7 @@ export async function notifyAdmin(
         channelsFired.push('telegram');
       } catch (err: any) {
         logger.error({ clientId, event, err: err.message }, '[Notify] Telegram alert failed');
-        if (pref === 'telegram') {
-          overallStatus = 'failed';
-          failureReason = `telegram: ${err.message}`;
-        }
+        errors.push(`telegram: ${err.message}`);
       }
     }
 
@@ -201,6 +199,7 @@ export async function notifyAdmin(
             { clientId, event, err: waErr.message },
             '[Notify] WhatsApp alert failed — checking Telegram fallback',
           );
+          errors.push(`whatsapp: ${waErr.message}`);
 
           // Fall back to Telegram if credentials are configured
           if (pref === 'whatsapp' && c.telegram_chat_id && c.telegram_bot_token_secret_id) {
@@ -213,13 +212,7 @@ export async function notifyAdmin(
                 { clientId, event, err: tgFallbackErr.message },
                 '[Notify] Telegram fallback also failed',
               );
-            }
-          }
-
-          if (!waSent) {
-            if (pref === 'whatsapp') {
-              overallStatus = 'failed';
-              failureReason = `whatsapp: ${waErr.message}`;
+              errors.push(`telegram_fallback: ${tgFallbackErr.message}`);
             }
           }
         }
@@ -233,10 +226,11 @@ export async function notifyAdmin(
               channelsFired.push('telegram_selfchat_fallback');
             } catch (tgSelfErr: any) {
               logger.error({ clientId, event, err: tgSelfErr.message }, '[Notify] Telegram self-chat fallback failed');
+              errors.push(`telegram_selfchat_fallback: ${tgSelfErr.message}`);
             }
           } else {
             logger.warn({ clientId }, '[Notify] Same-number self-chat with no Telegram configured — push notifications will not work');
-            failureReason = 'self_chat_no_push';
+            errors.push('self_chat_no_push');
           }
         }
       }
@@ -244,12 +238,13 @@ export async function notifyAdmin(
 
     if (channelsFired.length === 0) {
       overallStatus = 'failed';
-      if (!failureReason) {
-        if (pref === 'both') {
-          failureReason = 'both_channels_failed';
-        } else {
-          failureReason = 'no_channel_configured';
-        }
+      failureReason = errors.length > 0 ? errors.join(', ') : 'no_channel_configured';
+    } else {
+      overallStatus = 'sent';
+      if (errors.length > 0) {
+        failureReason = `partial_failure: ${errors.join(', ')}`;
+      } else if (channelsFired.includes('whatsapp') && isSelfChat && pref === 'whatsapp' && !c.telegram_chat_id) {
+        failureReason = 'self_chat_no_push';
       }
     }
 
@@ -290,7 +285,29 @@ export async function notifyAdmin(
 // ── Private channel senders ───────────────────────────────────────────────────
 
 /**
- * Sends an alert via Telegram bot.
+ * Converts simple Markdown formatting (*bold*, _italic_, `code`) to Telegram-compatible HTML tags
+ * and escapes special HTML entities (&, <, >) to prevent parse errors.
+ */
+function formatForTelegram(text: string): string {
+  // First escape HTML special characters
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  
+  // Replace Markdown-like symbols with HTML tags
+  // Bold: *text* -> <b>text</b>
+  html = html.replace(/\*(.*?)\*/g, '<b>$1</b>');
+  // Italic: _text_ -> <i>text</i>
+  html = html.replace(/_(.*?)_/g, '<i>$1</i>');
+  // Code: `text` -> <code>text</code>
+  html = html.replace(/`(.*?)`/g, '<code>$1</code>');
+  
+  return html;
+}
+
+/**
+ * Sends an alert via Telegram bot using HTML parse mode for robust formatting.
  * Throws on failure — caller handles retry/fallback logic.
  */
 async function sendTelegramAlert(
@@ -314,6 +331,8 @@ async function sendTelegramAlert(
     throw new Error(`Failed to decrypt bot token: ${decErr?.message ?? 'empty result'}`);
   }
 
+  const htmlText = formatForTelegram(text);
+
   const tgResponse = await fetch(
     `https://api.telegram.org/bot${botToken}/sendMessage`,
     {
@@ -321,8 +340,8 @@ async function sendTelegramAlert(
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
         chat_id:    c.telegram_chat_id,
-        text,
-        parse_mode: 'Markdown',
+        text:       htmlText,
+        parse_mode: 'HTML',
       }),
     },
   );
