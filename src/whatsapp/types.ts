@@ -41,4 +41,9 @@ export interface IWhatsAppAdapter {
    * Indicates whether the adapter is currently connected and ready to send.
    */
   isConnected(): boolean;
+
+  /**
+   * Returns the JID of the logged-in bot account, or null if not authenticated.
+   */
+  getOwnJid(): string | null;
 }

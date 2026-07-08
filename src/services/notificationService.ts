@@ -82,6 +82,7 @@ export async function notifyAdminOfScreenshot(
 interface ClientAlertSettings {
   admin_channel_preference:     string;   // 'telegram' | 'whatsapp' | 'both'
   admin_whatsapp_number:        string | null;
+  wa_phone_number_id:           string | null;
   telegram_chat_id:             string | null;
   telegram_bot_token_secret_id: string | null;
   notification_quota_used:      number;
@@ -108,7 +109,7 @@ export async function notifyAdmin(
     const { data: client, error: clientErr } = await supabase
       .from('clients')
       .select(
-        'admin_channel_preference, admin_whatsapp_number, ' +
+        'admin_channel_preference, admin_whatsapp_number, wa_phone_number_id, ' +
         'telegram_chat_id, telegram_bot_token_secret_id, ' +
         'notification_quota_used, notification_quota_reset_at',
       )
@@ -143,6 +144,33 @@ export async function notifyAdmin(
     const channelsFired: string[] = [];
     let   overallStatus: 'sent' | 'failed' | 'skipped' = 'sent';
     let   failureReason: string | null = null;
+
+    // Same-Number Detection (Self-Chat)
+    let isSelfChat = false;
+    if (c.admin_whatsapp_number) {
+      const cleanAdmin = c.admin_whatsapp_number.replace(/\D/g, '');
+      let cleanOwn: string | null = null;
+      if (c.wa_phone_number_id) {
+        cleanOwn = c.wa_phone_number_id.replace(/\D/g, '');
+      } else {
+        // Fallback: check active adapter in memory
+        try {
+          const adapter = getWhatsAppClient(clientId);
+          if (adapter && adapter.isConnected()) {
+            const ownJid = adapter.getOwnJid();
+            if (ownJid) {
+              cleanOwn = ownJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+            }
+          }
+        } catch {
+          // No active adapter in memory
+        }
+      }
+      if (cleanOwn && cleanOwn === cleanAdmin) {
+        isSelfChat = true;
+        logger.info({ clientId }, '[Notify] Same-number self-chat detected (bot number matches admin number)');
+      }
+    }
 
     // ── Telegram path ─────────────────────────────────────────────────────────
     if (pref === 'telegram' || pref === 'both') {
@@ -193,6 +221,22 @@ export async function notifyAdmin(
               overallStatus = 'failed';
               failureReason = `whatsapp: ${waErr.message}`;
             }
+          }
+        }
+
+        // Forced Telegram fallback for Same-Number Self-Chats (only for WhatsApp preference,
+        // since Telegram already ran for 'both')
+        if (waSent && isSelfChat && pref === 'whatsapp') {
+          if (c.telegram_chat_id && c.telegram_bot_token_secret_id) {
+            try {
+              await sendTelegramAlert(clientId, c, messageText);
+              channelsFired.push('telegram_selfchat_fallback');
+            } catch (tgSelfErr: any) {
+              logger.error({ clientId, event, err: tgSelfErr.message }, '[Notify] Telegram self-chat fallback failed');
+            }
+          } else {
+            logger.warn({ clientId }, '[Notify] Same-number self-chat with no Telegram configured — push notifications will not work');
+            failureReason = 'self_chat_no_push';
           }
         }
       }

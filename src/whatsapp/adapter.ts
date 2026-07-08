@@ -92,6 +92,10 @@ export class BaileysAdapter implements IWhatsAppAdapter {
     return this.connected;
   }
 
+  getOwnJid(): string | null {
+    return this.sock?.authState?.creds?.me?.id || null;
+  }
+
   /**
    * Sends a text message with a human-like typing delay and a 30s timeout.
    * NEVER call the underlying sock.sendMessage from outside this class.
@@ -259,6 +263,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
           if (this.isActiveAdapter()) {
             try {
+              const ownJid = this.getOwnJid();
+              const cleanPhone = ownJid ? ownJid.split('@')[0].split(':')[0].replace(/\D/g, '') : null;
               const supabase = getSupabaseClient();
               await supabase
                 .from('clients')
@@ -266,6 +272,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
                   wa_qr_data: null,
                   wa_qr_last_emitted_at: null,
                   wa_connection_status: 'connected',
+                  wa_phone_number_id: cleanPhone,
                 })
                 .eq('id', this.clientId);
             } catch (dbErr: any) {
