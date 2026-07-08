@@ -94,7 +94,21 @@ export function startDeliveryWorker(): Worker {
       if (deliveryType === 'digital_link') {
         deliveryText = product.delivery_content || '';
         if (!deliveryText) {
-          throw new Error(`[DeliveryWorker] Product ${order.product_id} has empty delivery_content`);
+          logger.error({ orderId, productId: order.product_id }, '[DeliveryWorker] Digital link product has empty delivery_content');
+          
+          await supabase
+            .from('orders')
+            .update({
+              delivery_status: 'failed',
+              delivery_attempts: 1,
+            })
+            .eq('id', orderId);
+
+          await notifyAdmin('delivery_failure', clientId, {
+            orderId,
+            details: 'Product config error: Digital link product has empty delivery_content.',
+          });
+          return;
         }
       }
 
@@ -118,7 +132,25 @@ export function startDeliveryWorker(): Worker {
           });
 
           if (decErr || !decrypted) {
-            throw new Error(`[DeliveryWorker] Decryption failed for existing item ${item.id}: ${decErr?.message}`);
+            logger.error({ orderId, itemId: item.id, err: decErr?.message }, '[DeliveryWorker] Decryption failed for existing item');
+            
+            await supabase.rpc('release_delivery_item_on_failure', {
+              p_order_id: orderId,
+            });
+
+            await supabase
+              .from('orders')
+              .update({
+                delivery_status: 'failed',
+                delivery_attempts: 1,
+              })
+              .eq('id', orderId);
+
+            await notifyAdmin('delivery_failure', clientId, {
+              orderId,
+              details: `Product config error: Decryption failed for existing inventory item ${item.id}.`,
+            });
+            return;
           }
           deliveryText = String(decrypted);
         } else {
@@ -165,7 +197,25 @@ export function startDeliveryWorker(): Worker {
           });
 
           if (decErr || !decrypted) {
-            throw new Error(`[DeliveryWorker] Decryption failed for item ${claimedItem.id}: ${decErr?.message}`);
+            logger.error({ orderId, itemId: claimedItem.id, err: decErr?.message }, '[DeliveryWorker] Decryption failed for claimed item');
+            
+            await supabase.rpc('release_delivery_item_on_failure', {
+              p_order_id: orderId,
+            });
+
+            await supabase
+              .from('orders')
+              .update({
+                delivery_status: 'failed',
+                delivery_attempts: 1,
+              })
+              .eq('id', orderId);
+
+            await notifyAdmin('delivery_failure', clientId, {
+              orderId,
+              details: `Product config error: Decryption failed for claimed inventory item ${claimedItem.id}.`,
+            });
+            return;
           }
           deliveryText = String(decrypted);
         }
@@ -317,6 +367,15 @@ export function startDeliveryWorker(): Worker {
         } else {
           // --- Content/Data Failure ---
           const currentAttempts = order.delivery_attempts + 1;
+
+          // Save the attempts counter and transition status in the DB
+          await supabase
+            .from('orders')
+            .update({
+              delivery_attempts: currentAttempts,
+              delivery_status: currentAttempts < 4 ? 'pending' : 'failed',
+            })
+            .eq('id', orderId);
 
           if (currentAttempts < 4) {
             let delayMs = 10000;
