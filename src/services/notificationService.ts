@@ -87,9 +87,15 @@ interface ClientAlertSettings {
   telegram_bot_token_secret_id: string | null;
   notification_quota_used:      number;
   notification_quota_reset_at:  string | null;
+  notification_tier:            string;
 }
 
-const PRO_QUOTA_LIMIT = 100; // max admin notifications per month
+export const TIER_LIMITS: Record<string, number> = {
+  free: 30,
+  standard: 180,
+  pro: 300,
+  ultra: 3000,
+};
 
 // ── Main dispatcher ───────────────────────────────────────────────────────────
 
@@ -111,7 +117,7 @@ export async function notifyAdmin(
       .select(
         'admin_channel_preference, admin_whatsapp_number, wa_phone_number_id, ' +
         'telegram_chat_id, telegram_bot_token_secret_id, ' +
-        'notification_quota_used, notification_quota_reset_at',
+        'notification_quota_used, notification_quota_reset_at, notification_tier',
       )
       .eq('id', clientId)
       .single();
@@ -124,16 +130,65 @@ export async function notifyAdmin(
 
     const c = client as unknown as ClientAlertSettings;
 
+    // ── 1.5. Auto-Reset Logic ────────────────────────────────────────────────
+    const now = new Date();
+    const resetAt = c.notification_quota_reset_at ? new Date(c.notification_quota_reset_at) : null;
+    if (!resetAt || resetAt < now) {
+      const nextReset = new Date();
+      nextReset.setMonth(nextReset.getMonth() + 1); // 1 month rolling reset
+
+      const { error: resetErr } = await supabase
+        .from('clients')
+        .update({
+          notification_quota_used: 0,
+          notification_quota_reset_at: nextReset.toISOString(),
+        })
+        .eq('id', clientId);
+
+      if (!resetErr) {
+        c.notification_quota_used = 0;
+        c.notification_quota_reset_at = nextReset.toISOString();
+        logger.info({ clientId, nextReset: nextReset.toISOString() }, '[Notify] Monthly quota reset triggered successfully');
+      } else {
+        logger.error({ clientId, err: resetErr.message }, '[Notify] Failed to reset client notification quota');
+      }
+    }
+
     // ── 2. Quota gate ─────────────────────────────────────────────────────────
-    // TODO: reset quota when notification_quota_reset_at < NOW()
-    if (c.notification_quota_used >= PRO_QUOTA_LIMIT) {
+    const tier = c.notification_tier || 'free';
+    const quotaLimit = TIER_LIMITS[tier] ?? TIER_LIMITS.free;
+
+    if (c.notification_quota_used >= quotaLimit) {
       logger.warn(
-        { clientId, used: c.notification_quota_used, limit: PRO_QUOTA_LIMIT },
+        { clientId, used: c.notification_quota_used, limit: quotaLimit, tier },
         '[Notify] Monthly quota exceeded — skipping notification',
       );
       await writeAuditLog(supabase, clientId, event, 'skipped', payload.orderId, null,
         'skipped', 'quota_exceeded');
       return;
+    }
+
+    // Ultra Tier rolling 24h safety limit (100 notifications/day cap)
+    if (tier === 'ultra') {
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { count, error: dailyCountErr } = await supabase
+        .from('admin_notification_log')
+        .select('*', { count: 'exact', head: true })
+        .eq('client_id', clientId)
+        .eq('status', 'sent')
+        .gte('sent_at', oneDayAgo);
+
+      if (dailyCountErr) {
+        logger.error({ clientId, err: dailyCountErr.message }, '[Notify] Failed to check daily rolling count for Ultra tier');
+      } else if (count !== null && count >= 100) {
+        logger.warn(
+          { clientId, dailyCount: count },
+          '[Notify] Daily safety limit of 100 alerts exceeded for Ultra tier — skipping notification',
+        );
+        await writeAuditLog(supabase, clientId, event, 'skipped', payload.orderId, null,
+          'skipped', 'daily_limit_exceeded');
+        return;
+      }
     }
 
     // ── 3. Build message text ─────────────────────────────────────────────────
