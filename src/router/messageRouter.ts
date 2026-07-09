@@ -204,6 +204,15 @@ export async function routeInboundMessage(
     conversationId = 'unknown';
   }
 
+  // ── 5.5. Handle silent quota block ────────────────────────────────────────
+  if (replyText === '') {
+    logger.info(
+      { from: msg.from, clientId, customerId: customer.id },
+      '[Router] Conversation quota exceeded (silent block) — ignoring message',
+    );
+    return;
+  }
+
   // ── 6. Log AI reply to raw messages table ─────────────────────────────────
   // Generate a synthetic wa_message_id for outbound AI replies (no real WA id yet).
   const outboundWaId = `ai_${Date.now()}_${customer.id.slice(0, 8)}`;

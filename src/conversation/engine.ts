@@ -26,7 +26,7 @@ import { aiClient, AICompletionRequest, AIMessage } from '../lib/ai/client';
 import { applyNegotiationGuardrail } from './negotiationGuardrail';
 import { buildSystemPrompt, CONVERSATION_HISTORY_LIMIT } from './constants';
 import { Product, Conversation, ConversationMessage } from '../db/types';
-import { notifyAdmin } from '../services/notificationService';
+import { notifyAdmin, TIER_CONVERSATION_LIMITS } from '../services/notificationService';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
@@ -57,6 +57,93 @@ export async function processMessage(
   inboundText:   string,
   customerPhone?: string,
 ): Promise<EngineResult> {
+
+  // ── 1. Quota check: only consume conversation quota on NEW conversations ────
+  const activeConversation = await convRepo.findActive(clientId, customerId);
+  if (!activeConversation) {
+    const { data: client, error: clientErr } = await supabase
+      .from('clients')
+      .select('notification_tier, conversation_quota_used, conversation_quota_reset_at')
+      .eq('id', clientId)
+      .single();
+
+    if (clientErr || !client) {
+      logger.warn({ clientId, err: clientErr?.message },
+        '[Engine] Could not fetch client for conversation quota check — processing message anyway');
+    } else {
+      const tier = client.notification_tier || 'free';
+      const quotaLimit = TIER_CONVERSATION_LIMITS[tier] ?? TIER_CONVERSATION_LIMITS.free;
+
+      // ── Auto-Reset Logic for Conversation Quota ──
+      const now = new Date();
+      const resetAt = client.conversation_quota_reset_at ? new Date(client.conversation_quota_reset_at) : null;
+      let currentUsed = client.conversation_quota_used;
+
+      if (!resetAt || resetAt < now) {
+        const nextReset = new Date();
+        nextReset.setMonth(nextReset.getMonth() + 1); // 1 month rolling reset
+
+        const { error: resetErr } = await supabase
+          .from('clients')
+          .update({
+            conversation_quota_used: 0,
+            conversation_quota_reset_at: nextReset.toISOString(),
+          })
+          .eq('id', clientId);
+
+        if (!resetErr) {
+          currentUsed = 0;
+        } else {
+          logger.error({ clientId, err: resetErr.message }, '[Engine] Failed to reset conversation quota');
+        }
+      }
+
+      // ── Atomic Quota Check & Increment ──
+      // This update will only modify the row if conversation_quota_used is strictly less than quotaLimit.
+      // This is 100% atomic at the database transaction layer.
+      const { data: updatedClients, error: updateErr } = await supabase
+        .from('clients')
+        .update({ conversation_quota_used: currentUsed + 1 })
+        .eq('id', clientId)
+        .lt('conversation_quota_used', quotaLimit)
+        .select('conversation_quota_used');
+
+      if (updateErr || !updatedClients || updatedClients.length === 0) {
+        logger.warn({ clientId, used: currentUsed, limit: quotaLimit, tier },
+          '[Engine] Conversation quota exceeded — blocking new chat');
+
+        // Fetch customer to see if we should send a capacity message (only once per 24 hours)
+        const { data: customer } = await supabase
+          .from('customers')
+          .select('quota_block_notified_at')
+          .eq('id', customerId)
+          .single();
+
+        const notifiedAt = customer?.quota_block_notified_at ? new Date(customer.quota_block_notified_at) : null;
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+        const capacityNotice = "We're currently at capacity and unable to start new automated assistant chats. Please contact support or try again later.";
+
+        if (!notifiedAt || notifiedAt < oneDayAgo) {
+          await supabase
+            .from('customers')
+            .update({ quota_block_notified_at: now.toISOString() })
+            .eq('id', customerId);
+
+          return {
+            replyText: capacityNotice,
+            conversationId: 'quota_blocked',
+          };
+        } else {
+          // Silent block (returns empty replyText, telling router to do nothing)
+          return {
+            replyText: '',
+            conversationId: 'quota_blocked_silent',
+          };
+        }
+      }
+    }
+  }
 
   // ── 1. Load or create conversation ───────────────────────────────────────
   const conversation: Conversation = await convRepo.findOrCreate(clientId, customerId);

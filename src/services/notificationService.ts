@@ -90,7 +90,14 @@ interface ClientAlertSettings {
   notification_tier:            string;
 }
 
-export const TIER_LIMITS: Record<string, number> = {
+export const TIER_NOTIFICATION_LIMITS: Record<string, number> = {
+  free: 30,
+  standard: 180,
+  pro: 300,
+  ultra: 3000,
+};
+
+export const TIER_CONVERSATION_LIMITS: Record<string, number> = {
   free: 30,
   standard: 180,
   pro: 300,
@@ -156,7 +163,7 @@ export async function notifyAdmin(
 
     // ── 2. Quota gate ─────────────────────────────────────────────────────────
     const tier = c.notification_tier || 'free';
-    const quotaLimit = TIER_LIMITS[tier] ?? TIER_LIMITS.free;
+    const quotaLimit = TIER_NOTIFICATION_LIMITS[tier] ?? TIER_NOTIFICATION_LIMITS.free;
 
     if (c.notification_quota_used >= quotaLimit) {
       logger.warn(

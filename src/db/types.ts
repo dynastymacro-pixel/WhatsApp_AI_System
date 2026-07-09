@@ -39,6 +39,8 @@ export interface Client {
   telegram_bot_token_secret_id: string | null; // UUID ref to vault.secrets
   notification_quota_used: number;
   notification_quota_reset_at: string | null;
+  conversation_quota_used: number;
+  conversation_quota_reset_at: string | null;
   created_at: string;
 }
 
@@ -49,6 +51,7 @@ export interface Customer {
   preferred_language: string | null;
   first_contact_at: string;
   last_message_at: string;
+  quota_block_notified_at: string | null;
 }
 
 export interface Message {
