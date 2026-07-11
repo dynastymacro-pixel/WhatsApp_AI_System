@@ -38,14 +38,17 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   private sock: WASocket | null = null;
   private connected = false;
   private readonly clientId: string;
+  private readonly onGiveUp?: () => void;
   private inboundHandlers: InboundHandler[] = [];
   private flushSession: (() => Promise<void>) | null = null;
 
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private connectionPromise: Promise<void> | null = null;
+  private reconnectAttempts = 0;
 
-  constructor(clientId: string) {
+  constructor(clientId: string, onGiveUp?: () => void) {
     this.clientId = clientId;
+    this.onGiveUp = onGiveUp;
   }
 
   /** Checks if this instance is currently the active adapter for its clientId in the manager. */
@@ -258,6 +261,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
         if (connection === 'open') {
           this.connected = true;
+          this.reconnectAttempts = 0;
           markPaired();
           logger.info({ clientId: this.clientId }, '[WhatsApp] ✅ Connected');
 
@@ -293,7 +297,46 @@ export class BaileysAdapter implements IWhatsAppAdapter {
           );
 
           if (shouldReconnect) {
-            logger.info('[WhatsApp] Reconnecting in 5s...');
+            this.reconnectAttempts++;
+
+            if (this.reconnectAttempts > 4) {
+              logger.error(
+                { clientId: this.clientId, attempts: this.reconnectAttempts },
+                '[WhatsApp] Max auto-reconnect attempts reached, awaiting manual retry.',
+              );
+
+              if (this.isActiveAdapter()) {
+                try {
+                  const supabase = getSupabaseClient();
+                  await supabase
+                    .from('clients')
+                    .update({
+                      wa_connection_status: 'connecting',
+                    })
+                    .eq('id', this.clientId);
+                } catch (dbErr: any) {
+                  logger.error(
+                    { err: dbErr.message, clientId: this.clientId },
+                    '[WhatsApp] Failed to update client state on max reconnect attempts',
+                  );
+                }
+              }
+
+              // Clean up connections, intervals, and activeInstance reference
+              await this.close();
+
+              // Invoke callback to remove from manager adapters map
+              if (this.onGiveUp) {
+                this.onGiveUp();
+              }
+              return; // Halt reconnection attempts
+            }
+
+            logger.info(
+              { attempts: this.reconnectAttempts, max: 4, clientId: this.clientId },
+              '[WhatsApp] Reconnecting in 5s...',
+            );
+
             setTimeout(() => {
               if (this.isActiveAdapter()) {
                 this.connect().catch((err: Error) => {

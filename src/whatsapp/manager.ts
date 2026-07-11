@@ -17,7 +17,10 @@ export async function initWhatsAppClient(clientId: string): Promise<BaileysAdapt
     return adapters.get(clientId)!;
   }
 
-  const adapter = new BaileysAdapter(clientId);
+  const adapter = new BaileysAdapter(clientId, () => {
+    logger.warn({ clientId }, '[WhatsAppManager] Removing dead client from adapters map due to max reconnect failures');
+    adapters.delete(clientId);
+  });
   adapters.set(clientId, adapter);
   await adapter.connect();
   return adapter;
