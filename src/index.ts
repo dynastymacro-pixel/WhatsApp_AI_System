@@ -107,21 +107,7 @@ async function main(): Promise<void> {
   startOutgoingWorker();
   startDeliveryWorker();
   startDeliveryListener();
-
-  // ── Step 3: Connect WhatsApp for the default client ──────────────────────
-  // Day 1: Single-tenant boot using DEFAULT_CLIENT_ID.
-  // Multi-tenant: load all active clients from DB and call initWhatsAppClient()
-  // for each one. That extension is straightforward — the manager supports it.
-  const clientId = config.defaultClientId;
-  logger.info({ clientId }, '[ZapSell] Initialising WhatsApp adapter...');
-
-  const adapter = await initWhatsAppClient(clientId);
-
-  // ── Step 4: Register the inbound message handler ──────────────────────────
-  registerBaileysWebhook(adapter, clientId);
-
-  logger.info('[ZapSell] ✅ Boot complete — waiting for WhatsApp connection...');
-  logger.info('[ZapSell] Scan the QR code printed above to pair your WhatsApp account.');
+  logger.info('[ZapSell] ✅ Boot complete — listening for connection requests and queue jobs...');
 }
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

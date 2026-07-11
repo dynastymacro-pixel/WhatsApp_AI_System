@@ -225,19 +225,19 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
         if (qr) {
           // ── Layer 1: ASCII art in stdout (works in local terminal) ───────────
-          logger.info('[WhatsApp] Scan the QR code below (local terminal):');
+          logger.info({ clientId: this.clientId }, '[WhatsApp] Scan the QR code below (local terminal):');
           qrcodeTerminal.generate(qr, { small: true });
 
           // ── Layer 2: Raw QR string in structured log (searchable in Railway) ─
           logger.info(
-            { qrRawString: qr },
+            { qrRawString: qr, clientId: this.clientId },
             '[WhatsApp] Raw QR string logged — paste into https://www.qrserver.com if ASCII is unreadable',
           );
 
           // ── Layer 3: Browser image via /qr endpoint ──────────────────────────
           setQrData(qr);
           logger.info(
-            { url: `http://localhost:${config.qrServerPort}/qr` },
+            { url: `http://localhost:${config.qrServerPort}/qr`, clientId: this.clientId },
             '[WhatsApp] Open /qr in your browser to scan a proper QR image',
           );
 
