@@ -28,7 +28,9 @@ import { logger }             from '../utils/logger';
 export type AdminNotifyEvent =
   | 'screenshot_received'
   | 'delivery_failure'
-  | 'order_created';
+  | 'order_created'
+  | 'order_approved'
+  | 'order_rejected';
 
 export interface AdminNotifyPayload {
   orderId:        string;
@@ -473,6 +475,30 @@ function buildAlertText(event: AdminNotifyEvent, payload: AdminNotifyPayload): s
         `📞 *Customer:* ${payload.customerPhone ?? 'unknown'}`,
         '',
         '_Open the ZapSell dashboard to review._',
+      ].join('\n');
+    }
+
+    case 'order_approved': {
+      return [
+        '✅ *Order Approved*',
+        '',
+        `📦 *Product:* ${payload.productName ?? '_(unknown)_'}`,
+        `💰 *Price:*   PKR ${Number(payload.agreedPrice ?? 0).toLocaleString()}`,
+        `📞 *Customer:* ${payload.customerPhone ?? 'unknown'}`,
+        '',
+        '_Order approved and delivery triggered._',
+      ].join('\n');
+    }
+
+    case 'order_rejected': {
+      return [
+        '❌ *Order Rejected*',
+        '',
+        `📦 *Product:* ${payload.productName ?? '_(unknown)_'}`,
+        `💰 *Price:*   PKR ${Number(payload.agreedPrice ?? 0).toLocaleString()}`,
+        `📞 *Customer:* ${payload.customerPhone ?? 'unknown'}`,
+        '',
+        '_Order has been marked as rejected._',
       ].join('\n');
     }
   }

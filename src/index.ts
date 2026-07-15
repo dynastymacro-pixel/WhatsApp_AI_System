@@ -27,6 +27,7 @@ import { enqueueDeliveryJob } from './queue/deliveryQueue';
 import { initWhatsAppClient, getAllAdapters, removeWhatsAppClient } from './whatsapp/manager';
 import { registerBaileysWebhook } from './webhooks/baileys';
 import { startQrServer, stopQrServer } from './whatsapp/qrServer';
+import { notifyAdmin } from './services/notificationService';
 
 let pollingInterval: NodeJS.Timeout | null = null;
 
@@ -82,6 +83,53 @@ function startDeliveryListener() {
           orderId: order.id,
           clientId: order.client_id,
         });
+      }
+
+      // ── 3. Find and notify admin of approved/rejected orders ──────────────────
+      const { data: pendingNotifications, error: notifyErr } = await supabase
+        .from('orders')
+        .select(`
+          id,
+          approval_status,
+          client_id,
+          agreed_price,
+          customers ( phone_number ),
+          products ( name ),
+          clients!inner ( notify_on_approval_action )
+        `)
+        .in('approval_status', ['approved', 'rejected'])
+        .eq('admin_action_notified', false)
+        .eq('clients.notify_on_approval_action', true);
+
+      if (notifyErr) {
+        logger.error({ err: notifyErr.message }, '[DeliveryListener] Failed to query pending admin action notifications');
+      } else if (pendingNotifications && pendingNotifications.length > 0) {
+        for (const o of pendingNotifications) {
+          // Set admin_action_notified = true BEFORE calling notifyAdmin (prevents duplicate dispatches)
+          const { error: markErr } = await supabase
+            .from('orders')
+            .update({ admin_action_notified: true })
+            .eq('id', o.id);
+
+          if (markErr) {
+            logger.error({ orderId: o.id, err: markErr.message }, '[DeliveryListener] Failed to mark order notified');
+            continue;
+          }
+
+          const event = o.approval_status === 'approved' ? 'order_approved' : 'order_rejected';
+          const customerPhone = (o.customers as any)?.phone_number;
+          const productName = (o.products as any)?.name;
+          const agreedPrice = Number(o.agreed_price || 0);
+
+          logger.info({ orderId: o.id, event }, '[DeliveryListener] Dispatching admin action notification');
+
+          await notifyAdmin(event, o.client_id, {
+            orderId: o.id,
+            customerPhone,
+            productName,
+            agreedPrice,
+          });
+        }
       }
     } catch (err: any) {
       logger.error({ err: err.message }, '[DeliveryListener] Unexpected error in polling loop');
